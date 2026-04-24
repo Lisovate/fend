@@ -1,0 +1,19 @@
+{
+  "name": "@fendsh/cli",
+  "version": "0.0.1",
+  "description": "Fend off risky dependencies. Sandboxed runtime for package installs and dev scripts.",
+  "bin": {
+    "fend": "bin/fend.js"
+  },
+  "keywords": [
+    "security",
+    "sandbox",
+    "npm",
+    "supply-chain"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lisovate/fend.git"
+  }
+}
