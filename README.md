@@ -159,6 +159,12 @@ swift test --package-path swift
 
 First time you run `fend <anything>`, `swift/scripts/prepare-runtime.sh` fires and prepares `~/.fend/runtime/` (kernel + initrd + rootfs.img). Takes a few minutes; cached afterward.
 
+### Packaging for npm
+
+`scripts/build-binary.sh` builds a release binary and stages it into `packages/cli-darwin-arm64/bin/` so the JS wrapper at `bin/fend.js` can find it. The wrapper resolves the correct platform package via npm's `optionalDependencies`, falling back to the monorepo path during local development.
+
+Publishing requires Developer ID signing + Apple notarization — Apple Virtualization entitlements are otherwise rejected at runtime on end-user machines. The current build script only ad-hoc signs.
+
 ---
 
 ## Roadmap

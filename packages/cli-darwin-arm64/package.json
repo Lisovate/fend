@@ -1,0 +1,21 @@
+{
+  "name": "@fendsh/cli-darwin-arm64",
+  "version": "0.1.0-alpha.1",
+  "description": "Native fend binary for macOS Apple Silicon. Installed automatically as an optional dependency of @fendsh/cli.",
+  "homepage": "https://fend.sh",
+  "files": [
+    "bin/",
+    "LICENSE"
+  ],
+  "os": ["darwin"],
+  "cpu": ["arm64"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lisovate/fend.git",
+    "directory": "packages/cli-darwin-arm64"
+  },
+  "bugs": {
+    "url": "https://github.com/Lisovate/fend/issues"
+  }
+}

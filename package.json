@@ -1,19 +1,36 @@
 {
   "name": "@fendsh/cli",
-  "version": "0.0.1",
+  "version": "0.1.0-alpha.1",
   "description": "Fend off risky dependencies. Sandboxed runtime for package installs and dev scripts.",
+  "homepage": "https://fend.sh",
   "bin": {
     "fend": "bin/fend.js"
+  },
+  "files": [
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@fendsh/cli-darwin-arm64": "0.1.0-alpha.1"
   },
   "keywords": [
     "security",
     "sandbox",
     "npm",
-    "supply-chain"
+    "supply-chain",
+    "virtualization",
+    "macos"
   ],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Lisovate/fend.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Lisovate/fend/issues"
   }
 }
