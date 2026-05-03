@@ -1,9 +1,20 @@
 import XCTest
 @testable import FendCommon
+@testable import FendCLI
 
 /// Tests for the framing protocol through pipes, which validates the same
 /// protocol behavior used by the CLI's relayOutput and startStdinForwarding.
 final class TerminalTests: XCTestCase {
+    func testTerminalUIStatusRenderingWithoutColor() {
+        XCTAssertEqual(
+            TerminalUI.renderStatus(.success, "sandbox ready", detail: "1.6s", colorEnabled: false),
+            "ok    sandbox ready  1.6s"
+        )
+        XCTAssertEqual(
+            TerminalUI.renderStatus(.warning, "network is off", detail: nil, colorEnabled: false),
+            "warn  network is off"
+        )
+    }
 
     /// Test writing OutputData + ExitStatus frames to a pipe, then reading them back.
     func testRelayOutputBehaviorViaPipe() throws {

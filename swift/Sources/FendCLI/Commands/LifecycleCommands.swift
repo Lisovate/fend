@@ -14,7 +14,7 @@ struct Status: ParsableCommand {
         let paths = FendPaths()
         let daemonFd = connectToDaemon(socketPath: paths.socketPath)
         guard daemonFd >= 0 else {
-            print("fend: daemon is not running")
+            TerminalUI.info("daemon not running")
             return
         }
         defer { Darwin.close(daemonFd) }
@@ -25,29 +25,30 @@ struct Status: ParsableCommand {
 
             if response.type == .daemonError {
                 let err = try JSONDecoder().decode(DaemonErrorMsg.self, from: response.payload)
-                fputs("fend: \(err.message)\n", stderr)
+                TerminalUI.error(err.message)
                 return
             }
 
             guard response.type == .daemonStatusResponse else {
-                fputs("fend: unexpected response\n", stderr)
+                TerminalUI.error("unexpected daemon response")
                 return
             }
 
             let status = try JSONDecoder().decode(DaemonStatusResponse.self, from: response.payload)
             if status.vms.isEmpty {
-                print("fend: no running VMs")
+                TerminalUI.info("no running VMs", stream: .stdout)
             } else {
-                print("PROJECT                          STATE       UPTIME     PORTS")
-                for vm in status.vms {
+                TerminalUI.section("Running VMs")
+                let rows = status.vms.map { vm in
                     let name = URL(fileURLWithPath: vm.projectDir).lastPathComponent
                     let uptime = formatUptime(vm.uptimeSeconds)
-                    let ports = vm.forwardedPorts.map(String.init).joined(separator: ",")
-                    print("\(name.padding(toLength: 32, withPad: " ", startingAt: 0)) \(vm.state.padding(toLength: 11, withPad: " ", startingAt: 0)) \(uptime.padding(toLength: 10, withPad: " ", startingAt: 0)) \(ports)")
+                    let ports = vm.forwardedPorts.isEmpty ? "-" : vm.forwardedPorts.map(String.init).joined(separator: ",")
+                    return [name, vm.state, uptime, ports]
                 }
+                TerminalUI.table(headers: ["Project", "State", "Uptime", "Ports"], rows: rows)
             }
         } catch {
-            fputs("fend: \(error)\n", stderr)
+            TerminalUI.error(TerminalUI.describe(error))
         }
     }
 }
@@ -65,7 +66,7 @@ struct Stop: ParsableCommand {
 
         let daemonFd = connectToDaemon(socketPath: paths.socketPath)
         guard daemonFd >= 0 else {
-            print("fend: daemon is not running")
+            TerminalUI.info("daemon not running")
             return
         }
         defer { Darwin.close(daemonFd) }
@@ -78,12 +79,12 @@ struct Stop: ParsableCommand {
             let response = try FramedMessage.read(from: daemonFd)
             if response.type == .daemonError {
                 let err = try JSONDecoder().decode(DaemonErrorMsg.self, from: response.payload)
-                fputs("fend: \(err.message)\n", stderr)
+                TerminalUI.error(err.message)
             } else if response.type == .ready {
-                print("fend: VM stopped for \(URL(fileURLWithPath: projectDir).lastPathComponent)")
+                TerminalUI.success("VM stopped", detail: URL(fileURLWithPath: projectDir).lastPathComponent)
             }
         } catch {
-            fputs("fend: \(error)\n", stderr)
+            TerminalUI.error(TerminalUI.describe(error))
         }
     }
 }
@@ -101,18 +102,18 @@ struct Clean: ParsableCommand {
         let hash = FendPaths.projectHash(for: projectDir)
         let projectStateDir = paths.stateDir.appendingPathComponent(hash)
 
-        print("fend: cleaning \(projectDir.lastPathComponent)...")
+        TerminalUI.step("cleaning project", detail: projectDir.lastPathComponent)
 
         let fm = FileManager.default
         if fm.fileExists(atPath: projectStateDir.path) {
             do {
                 try fm.removeItem(at: projectStateDir)
-                print("fend: removed per-project state (\(hash))")
+                TerminalUI.success("removed per-project state", detail: hash)
             } catch {
-                fputs("fend: failed to remove \(projectStateDir.path): \(error.localizedDescription)\n", stderr)
+                TerminalUI.error("failed to remove project state", detail: error.localizedDescription)
             }
         } else {
-            print("fend: no project state found")
+            TerminalUI.info("no project state found")
         }
     }
 }
@@ -147,20 +148,25 @@ struct Doctor: ParsableCommand {
             }
         }()
 
-        print("fend doctor")
-        print("  macOS version: \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        TerminalUI.section("fend doctor")
+        TerminalUI.fields([
+            ("macOS", ProcessInfo.processInfo.operatingSystemVersionString),
+        ])
 
         #if arch(arm64)
-        print("  Architecture:  Apple Silicon (arm64)")
+        let architecture = "Apple Silicon (arm64)"
         #else
-        print("  Architecture:  Intel (x86_64)")
+        let architecture = "Intel (x86_64)"
         #endif
 
-        print("  Kernel:        \(kernelExists ? paths.runtimeDir.appendingPathComponent("vmlinuz").path : "NOT FOUND")")
-        print("  Initrd:        \(initrdExists ? paths.runtimeDir.appendingPathComponent("initrd").path : "NOT FOUND")")
-        print("  Rootfs:        \(rootfsExists ? paths.rootfsImagePath.path : "NOT FOUND")")
-        print("  Docker:        \(dockerAvailable ? "available" : "NOT FOUND")")
-        print("  Config:        node=\(config.runtime.node ?? "auto") bun=\(config.runtime.bun ?? "auto") cpus=\(config.vm.cpus) mem=\(config.vm.memoryMB)MB")
+        TerminalUI.fields([
+            ("architecture", architecture),
+            ("kernel", kernelExists ? paths.runtimeDir.appendingPathComponent("vmlinuz").path : "missing"),
+            ("initrd", initrdExists ? paths.runtimeDir.appendingPathComponent("initrd").path : "missing"),
+            ("rootfs", rootfsExists ? paths.rootfsImagePath.path : "missing"),
+            ("docker", dockerAvailable ? "available" : "missing"),
+            ("config", "node=\(config.runtime.node ?? "auto") bun=\(config.runtime.bun ?? "auto") cpus=\(config.vm.cpus) mem=\(config.vm.memoryMB)MB"),
+        ])
 
         var issues: [String] = []
         if !kernelExists || !initrdExists || !rootfsExists {
@@ -171,12 +177,12 @@ struct Doctor: ParsableCommand {
         }
 
         if issues.isEmpty {
-            print("")
-            print("  All checks passed.")
+            TerminalUI.blank(.stdout)
+            TerminalUI.success("all checks passed", stream: .stdout)
         } else {
-            print("")
+            TerminalUI.blank(.stdout)
             for issue in issues {
-                print("  \(issue)")
+                TerminalUI.warning(issue, stream: .stdout)
             }
         }
     }
@@ -225,13 +231,13 @@ struct DaemonStop: ParsableCommand {
         let paths = FendPaths()
         guard let pidStr = try? String(contentsOf: paths.pidPath, encoding: .utf8),
               let pid = Int32(pidStr.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            print("fend: daemon is not running")
+            TerminalUI.info("daemon not running")
             return
         }
         if kill(pid, SIGTERM) == 0 {
-            print("fend: daemon stopped (pid \(pid))")
+            TerminalUI.success("daemon stopped", detail: "pid \(pid)")
         } else {
-            print("fend: daemon is not running (stale pid file)")
+            TerminalUI.warning("daemon not running", detail: "removed stale pid/socket files")
             try? FileManager.default.removeItem(at: paths.pidPath)
             try? FileManager.default.removeItem(at: paths.socketPath)
         }

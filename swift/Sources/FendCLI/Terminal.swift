@@ -70,6 +70,14 @@ func restoreTerminal() {
     }
 }
 
+/// Write a host-side status line while respecting raw terminal mode.
+/// In raw mode `\n` does not imply carriage return, which makes status output
+/// staircase across the terminal. Guest stdout/stderr is relayed unchanged.
+func writeStatusLine(_ line: String) {
+    let newline = rawModeEnabled ? "\r\n" : "\n"
+    fputs(line + newline, stderr)
+}
+
 /// Get the current terminal window size.
 func getWindowSize() -> (rows: UInt16, cols: UInt16) {
     var ws = winsize()
@@ -130,7 +138,10 @@ func sendSignal(_ sig: Int32, to fd: Int32) {
 }
 
 /// Read output frames from fd and write to stdout/stderr. Returns exit code.
-func relayOutput(from fd: Int32) throws -> Int32 {
+func relayOutput(
+    from fd: Int32,
+    onNetworkEvent: (NetworkEvent) -> Void = { _ in }
+) throws -> Int32 {
     while true {
         let frame = try FramedMessage.read(from: fd)
         switch frame.type {
@@ -143,9 +154,12 @@ func relayOutput(from fd: Int32) throws -> Int32 {
         case .exitStatus:
             let status = try JSONDecoder().decode(ExitStatus.self, from: frame.payload)
             return status.code
+        case .networkEvent:
+            let event = try JSONDecoder().decode(NetworkEvent.self, from: frame.payload)
+            onNetworkEvent(event)
         case .daemonError:
             let err = try JSONDecoder().decode(DaemonErrorMsg.self, from: frame.payload)
-            fputs("fend: \(err.message)\n", stderr)
+            TerminalUI.error(err.message)
             return 1
         default:
             break

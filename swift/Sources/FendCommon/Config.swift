@@ -5,11 +5,18 @@ public struct FendConfig {
     public let runtime: RuntimeConfig
     public let vm: VMConfig
     public let audit: AuditConfig
+    public let network: NetworkConfig
 
-    public init(runtime: RuntimeConfig = .init(), vm: VMConfig = .init(), audit: AuditConfig = .init()) {
+    public init(
+        runtime: RuntimeConfig = .init(),
+        vm: VMConfig = .init(),
+        audit: AuditConfig = .init(),
+        network: NetworkConfig = .init()
+    ) {
         self.runtime = runtime
         self.vm = vm
         self.audit = audit
+        self.network = network
     }
 
     /// Load config from a .fend.toml file, or return defaults if not found.
@@ -18,25 +25,36 @@ public struct FendConfig {
         guard let content = try? String(contentsOf: configPath, encoding: .utf8) else {
             return FendConfig()
         }
-        return parse(toml: content)
+        let result = parseWithDiagnostics(toml: content)
+        emitDiagnostics(result.diagnostics, path: configPath.path)
+        return result.config
     }
 
-    /// Parse minimal TOML config. Supports [runtime], [vm], and [audit] sections.
+    /// Parse minimal TOML config. Supports [runtime], [vm], [audit], and
+    /// [network] sections.
     internal static func parse(toml content: String) -> FendConfig {
+        parseWithDiagnostics(toml: content).config
+    }
+
+    internal static func parseWithDiagnostics(toml content: String) -> ConfigParseResult {
         var section = ""
         var nodeVersion: String? = nil
         var bunVersion: String? = nil
         var cpus: Int? = nil
         var memoryMB: UInt64? = nil
-        var auditLevel: String? = nil
+        var networkMode: NetworkMode? = nil
+        var auditLevel: AuditLevel? = nil
         var auditRebuild: Bool? = nil
         var auditAutoApproveCI: Bool? = nil
         var auditBlockSeverities: [String]? = nil
         var auditPromptSeverities: [String]? = nil
         var auditFixOnInstall: Bool? = nil
         var auditIncludePrerelease: Bool? = nil
+        var diagnostics: [ConfigDiagnostic] = []
+        let knownSections: Set<String> = ["runtime", "vm", "network", "audit"]
 
-        for line in content.components(separatedBy: .newlines) {
+        for (idx, line) in content.components(separatedBy: .newlines).enumerated() {
+            let lineNumber = idx + 1
             let trimmed = line.trimmingCharacters(in: .whitespaces)
 
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
@@ -44,11 +62,20 @@ public struct FendConfig {
             // Section header
             if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
                 section = String(trimmed.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
+                if !knownSections.contains(section) {
+                    diagnostics.append(ConfigDiagnostic(
+                        line: lineNumber,
+                        message: "unknown section [\(section)] ignored"
+                    ))
+                }
                 continue
             }
 
             // Key = value
-            guard let eqIdx = trimmed.firstIndex(of: "=") else { continue }
+            guard let eqIdx = trimmed.firstIndex(of: "=") else {
+                diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid line ignored"))
+                continue
+            }
             let key = trimmed[trimmed.startIndex..<eqIdx].trimmingCharacters(in: .whitespaces)
             var value = String(trimmed[trimmed.index(after: eqIdx)...]).trimmingCharacters(in: .whitespaces)
 
@@ -69,35 +96,92 @@ public struct FendConfig {
             switch (section, key) {
             case ("runtime", "node"): nodeVersion = value
             case ("runtime", "bun"): bunVersion = value
-            case ("vm", "cpus"): cpus = Int(value)
-            case ("vm", "memory"): memoryMB = parseMemory(value)
-            case ("audit", "level"): auditLevel = value
-            case ("audit", "rebuild"): auditRebuild = (value.lowercased() == "true")
-            case ("audit", "auto_approve_in_ci"): auditAutoApproveCI = (value.lowercased() == "true")
-            case ("audit", "block"): auditBlockSeverities = parseArray(value)
-            case ("audit", "prompt"): auditPromptSeverities = parseArray(value)
-            case ("audit", "fix_on_install"): auditFixOnInstall = (value.lowercased() == "true")
-            case ("audit", "include_prerelease"): auditIncludePrerelease = (value.lowercased() == "true")
-            default: break
+            case ("vm", "cpus"):
+                if let parsed = Int(value), parsed > 0 {
+                    cpus = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid vm.cpus value '\(value)' ignored"))
+                }
+            case ("vm", "memory"):
+                if let parsed = parseMemory(value), parsed > 0 {
+                    memoryMB = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid vm.memory value '\(value)' ignored"))
+                }
+            case ("network", "mode"):
+                if let parsed = NetworkMode.parse(value) {
+                    networkMode = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid network.mode value '\(value)' ignored"))
+                }
+            case ("audit", "level"):
+                if let parsed = AuditLevel.parse(value) {
+                    auditLevel = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid audit.level value '\(value)' ignored"))
+                }
+            case ("audit", "rebuild"):
+                auditRebuild = parseBool(value, key: "audit.rebuild", line: lineNumber, diagnostics: &diagnostics)
+            case ("audit", "auto_approve_in_ci"):
+                auditAutoApproveCI = parseBool(value, key: "audit.auto_approve_in_ci", line: lineNumber, diagnostics: &diagnostics)
+            case ("audit", "block"):
+                if let parsed = parseArray(value) {
+                    auditBlockSeverities = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid audit.block array ignored"))
+                }
+            case ("audit", "prompt"):
+                if let parsed = parseArray(value) {
+                    auditPromptSeverities = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid audit.prompt array ignored"))
+                }
+            case ("audit", "fix_on_install"):
+                auditFixOnInstall = parseBool(value, key: "audit.fix_on_install", line: lineNumber, diagnostics: &diagnostics)
+            case ("audit", "include_prerelease"):
+                auditIncludePrerelease = parseBool(value, key: "audit.include_prerelease", line: lineNumber, diagnostics: &diagnostics)
+            default:
+                if knownSections.contains(section) {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "unknown key \(section).\(key) ignored"))
+                }
             }
         }
 
-        return FendConfig(
+        let config = FendConfig(
             runtime: RuntimeConfig(node: nodeVersion, bun: bunVersion),
             vm: VMConfig(
                 cpus: cpus ?? VMConfig().cpus,
                 memoryMB: memoryMB ?? VMConfig().memoryMB
             ),
             audit: AuditConfig(
-                level: AuditLevel.parse(auditLevel) ?? AuditConfig().level,
+                level: auditLevel ?? AuditConfig().level,
                 rebuild: auditRebuild ?? AuditConfig().rebuild,
                 autoApproveInCI: auditAutoApproveCI ?? AuditConfig().autoApproveInCI,
                 block: auditBlockSeverities ?? AuditConfig().block,
                 prompt: auditPromptSeverities ?? AuditConfig().prompt,
                 fixOnInstall: auditFixOnInstall ?? AuditConfig().fixOnInstall,
                 includePrerelease: auditIncludePrerelease ?? AuditConfig().includePrerelease
+            ),
+            network: NetworkConfig(
+                mode: networkMode ?? NetworkConfig().mode
             )
         )
+        return ConfigParseResult(config: config, diagnostics: diagnostics)
+    }
+
+    private static func parseBool(
+        _ value: String,
+        key: String,
+        line: Int,
+        diagnostics: inout [ConfigDiagnostic]
+    ) -> Bool? {
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true": return true
+        case "false": return false
+        default:
+            diagnostics.append(ConfigDiagnostic(line: line, message: "invalid \(key) boolean '\(value)' ignored"))
+            return nil
+        }
     }
 
     private static func parseArray(_ value: String) -> [String]? {
@@ -124,6 +208,26 @@ public struct FendConfig {
         }
         return UInt64(value)
     }
+
+    private static func emitDiagnostics(_ diagnostics: [ConfigDiagnostic], path: String) {
+        guard !diagnostics.isEmpty else { return }
+        for diagnostic in diagnostics {
+            let line = "fend: config warning: \(path):\(diagnostic.line): \(diagnostic.message)\n"
+            if let data = line.data(using: .utf8) {
+                FileHandle.standardError.write(data)
+            }
+        }
+    }
+}
+
+public struct ConfigParseResult {
+    public let config: FendConfig
+    public let diagnostics: [ConfigDiagnostic]
+}
+
+public struct ConfigDiagnostic: Equatable {
+    public let line: Int
+    public let message: String
 }
 
 public struct RuntimeConfig {
@@ -143,5 +247,27 @@ public struct VMConfig {
     public init(cpus: Int = 2, memoryMB: UInt64 = 2048) {
         self.cpus = cpus
         self.memoryMB = memoryMB
+    }
+}
+
+public enum NetworkMode: String, Codable {
+    case on
+    case off
+
+    public static func parse(_ value: String?) -> NetworkMode? {
+        guard let value else { return nil }
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "on", "allow", "allowed", "enabled", "true": return .on
+        case "off", "deny", "denied", "disabled", "false", "none": return .off
+        default: return nil
+        }
+    }
+}
+
+public struct NetworkConfig {
+    public let mode: NetworkMode
+
+    public init(mode: NetworkMode = .on) {
+        self.mode = mode
     }
 }

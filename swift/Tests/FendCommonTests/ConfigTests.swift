@@ -11,6 +11,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertNil(config.runtime.bun)
         XCTAssertEqual(config.vm.cpus, 2)
         XCTAssertEqual(config.vm.memoryMB, 2048)
+        XCTAssertEqual(config.network.mode, .on)
     }
 
     func testDefaultRuntimeConfig() {
@@ -23,6 +24,11 @@ final class ConfigTests: XCTestCase {
         let vm = VMConfig()
         XCTAssertEqual(vm.cpus, 2)
         XCTAssertEqual(vm.memoryMB, 2048)
+    }
+
+    func testDefaultNetworkConfig() {
+        let network = NetworkConfig()
+        XCTAssertEqual(network.mode, .on)
     }
 
     // MARK: - Load from non-existent file
@@ -77,6 +83,20 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.vm.memoryMB, 1024)
     }
 
+    func testParseTOMLNetwork() {
+        let toml = """
+        [network]
+        mode = "off"
+        """
+        let config = FendConfig.parse(toml: toml)
+        XCTAssertEqual(config.network.mode, .off)
+    }
+
+    func testParseTOMLNetworkAliases() {
+        XCTAssertEqual(FendConfig.parse(toml: "[network]\nmode = \"disabled\"").network.mode, .off)
+        XCTAssertEqual(FendConfig.parse(toml: "[network]\nmode = \"enabled\"").network.mode, .on)
+    }
+
     func testParseTOMLWithComments() {
         let toml = """
         # This is a comment
@@ -109,6 +129,50 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.runtime.node, "20")
     }
 
+    func testParseDiagnosticsForInvalidValues() {
+        let toml = """
+        [vm]
+        cpus = 0
+        memory = "massive"
+
+        [network]
+        mode = "blocked"
+
+        [audit]
+        rebuild = "sometimes"
+        level = "paranoid"
+        """
+
+        let result = FendConfig.parseWithDiagnostics(toml: toml)
+
+        XCTAssertEqual(result.config.vm.cpus, 2)
+        XCTAssertEqual(result.config.vm.memoryMB, 2048)
+        XCTAssertEqual(result.config.network.mode, .on)
+        XCTAssertEqual(result.config.audit.rebuild, true)
+        XCTAssertEqual(result.config.audit.level, .strict)
+        XCTAssertEqual(result.diagnostics.map(\.line), [2, 3, 6, 9, 10])
+        XCTAssertTrue(result.diagnostics.map(\.message).contains("invalid network.mode value 'blocked' ignored"))
+    }
+
+    func testParseDiagnosticsForUnknownKeysAndSections() {
+        let toml = """
+        [runtime]
+        node = "22"
+        python = "3.12"
+
+        [future]
+        enabled = true
+        """
+
+        let result = FendConfig.parseWithDiagnostics(toml: toml)
+
+        XCTAssertEqual(result.config.runtime.node, "22")
+        XCTAssertEqual(result.diagnostics, [
+            ConfigDiagnostic(line: 3, message: "unknown key runtime.python ignored"),
+            ConfigDiagnostic(line: 5, message: "unknown section [future] ignored"),
+        ])
+    }
+
     func testParseTOMLFull() {
         let toml = """
         [runtime]
@@ -118,11 +182,15 @@ final class ConfigTests: XCTestCase {
         [vm]
         cpus = 4
         memory = "4GB"
+
+        [network]
+        mode = "off"
         """
         let config = FendConfig.parse(toml: toml)
         XCTAssertEqual(config.runtime.node, "22.11.0")
         XCTAssertEqual(config.runtime.bun, "1.1.0")
         XCTAssertEqual(config.vm.cpus, 4)
         XCTAssertEqual(config.vm.memoryMB, 4096)
+        XCTAssertEqual(config.network.mode, .off)
     }
 }

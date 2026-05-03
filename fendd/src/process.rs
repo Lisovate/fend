@@ -27,6 +27,7 @@ pub fn spawn(
     cmd: &ExecuteCommand,
 ) -> Result<SpawnResult, ()> {
     let env = build_env(cmd);
+    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     let child = unsafe {
         Command::new(&cmd.cmd)
@@ -36,7 +37,7 @@ pub fn spawn(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
-            .pre_exec(drop_root)
+            .pre_exec(move || prepare_child(network_mode.as_deref()))
             .spawn()
     };
 
@@ -93,6 +94,7 @@ pub fn spawn_pty(
     cmd: &ExecuteCommand,
 ) -> Result<SpawnResult, ()> {
     let env = build_env(cmd);
+    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     // Allocate PTY
     let mut master: libc::c_int = 0;
@@ -124,7 +126,7 @@ pub fn spawn_pty(
             .stdout(Stdio::from_raw_fd(libc::dup(slave_fd)))
             .stderr(Stdio::from_raw_fd(slave_fd))
             .pre_exec(move || {
-                drop_root()?;
+                prepare_child(network_mode.as_deref())?;
                 // Create new session and set controlling terminal
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -250,12 +252,35 @@ fn drop_root() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn prepare_child(network_mode: Option<&str>) -> Result<(), std::io::Error> {
+    apply_network_policy(network_mode)?;
+    drop_root()
+}
+
+#[cfg(target_os = "linux")]
+fn apply_network_policy(network_mode: Option<&str>) -> Result<(), std::io::Error> {
+    if matches!(network_mode, Some("off")) {
+        let rc = unsafe { libc::unshare(libc::CLONE_NEWNET) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_network_policy(_network_mode: Option<&str>) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
 fn build_env(cmd: &ExecuteCommand) -> std::collections::HashMap<String, String> {
     let mut env = cmd.env.clone();
     let path = format!("/home/user/.local/bin:{}", std::env::var("PATH").unwrap_or_default());
     env.insert("PATH".to_string(), path);
     env.insert("HOME".to_string(), "/home/user".to_string());
     env.insert("USER".to_string(), "user".to_string());
+    env.entry("NPM_CONFIG_CACHE".to_string())
+        .or_insert_with(|| "/home/user/.npm".to_string());
     if cmd.tty {
         env.insert("TERM".to_string(), env.get("TERM").cloned().unwrap_or_else(|| "xterm-256color".to_string()));
     }
@@ -326,6 +351,7 @@ mod tests {
         assert!(env.get("PATH").unwrap().contains("/home/user/.local/bin"));
         assert_eq!(env.get("HOME").unwrap(), "/home/user");
         assert_eq!(env.get("USER").unwrap(), "user");
+        assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/home/user/.npm");
     }
 
     #[test]
@@ -342,6 +368,22 @@ mod tests {
         };
         let env = build_env(&cmd);
         assert_eq!(env.get("MY_VAR").unwrap(), "my_value");
+    }
+
+    #[test]
+    fn test_build_env_preserves_explicit_npm_cache() {
+        let mut cmd_env = HashMap::new();
+        cmd_env.insert("NPM_CONFIG_CACHE".to_string(), "/tmp/npm-cache".to_string());
+        let cmd = ExecuteCommand {
+            id: 1,
+            cmd: "test".to_string(),
+            args: vec![],
+            env: cmd_env,
+            cwd: "/tmp".to_string(),
+            tty: false,
+        };
+        let env = build_env(&cmd);
+        assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/tmp/npm-cache");
     }
 
     #[test]

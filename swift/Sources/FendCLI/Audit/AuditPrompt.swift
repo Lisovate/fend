@@ -54,7 +54,8 @@ enum AuditPrompt {
     /// Read a single y/N answer from /dev/tty. Default is N (empty/Enter = no).
     static func readYN() -> Bool {
         guard let tty = fopen("/dev/tty", "r") else {
-            fputs("\nfend: no tty available — denying by default\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.warning("no tty available", detail: "denying by default")
             return false
         }
         defer { fclose(tty) }
@@ -77,20 +78,21 @@ enum AuditPrompt {
         if report.findings.isEmpty {
             let time = report.elapsedSeconds > 0
                 ? String(format: " (%.1fs)", report.elapsedSeconds) : ""
-            fputs("fend audit: \(report.totalPackages) packages clean\(time)\n", stderr)
+            TerminalUI.success("audit clean", detail: "\(report.totalPackages) packages\(time)")
             return
         }
 
         let advisoryCount = report.findings.reduce(0) { $0 + $1.1.count }
         let worst = report.worstSeverity.uppercased()
-        let time = report.elapsedSeconds > 0
-            ? String(format: "%.1fs, ", report.elapsedSeconds) : ""
+        let time = report.elapsedSeconds > 0 ? String(format: "%.1fs", report.elapsedSeconds) : "-"
         let advWord = advisoryCount == 1 ? "advisory" : "advisories"
         let pkgWord = report.findings.count == 1 ? "package" : "packages"
-        fputs(
-            "fend audit: \(advisoryCount) \(advWord) in \(report.findings.count) of \(report.totalPackages) \(pkgWord) (\(time)worst \(worst))\n\n",
-            stderr
-        )
+        TerminalUI.warning("\(advisoryCount) \(advWord) found", detail: "worst \(worst)")
+        TerminalUI.fields([
+            ("packages", "\(report.findings.count) of \(report.totalPackages) \(pkgWord)"),
+            ("duration", time),
+        ], stream: .stderr)
+        TerminalUI.blank()
 
         let classes = classify(plan: plan)
 
@@ -102,20 +104,50 @@ enum AuditPrompt {
             return lhs.0.name < rhs.0.name
         }
 
-        for (pkg, advisories) in sorted {
+        let rows = sorted.map { item in
+            let pkg = item.0
+            let advisories = item.1
             let cls = classes[pkg.name] ?? .noFix
-            fputs("  \(formatHeader(pkg: pkg, cls: cls))\n", stderr)
-            let advSorted = advisories.sorted {
-                severityOrder($0.severity) < severityOrder($1.severity)
+            let ids = advisories
+                .sorted { severityOrder($0.severity) < severityOrder($1.severity) }
+                .prefix(3)
+                .map(\.id)
+                .joined(separator: ",")
+            let suffix = advisories.count > 3 ? ",+\(advisories.count - 3)" : ""
+            return [
+                pkg.name,
+                pkg.version,
+                fixText(for: cls),
+                FixPlanner.worstSeverity(advisories).uppercased(),
+                ids + suffix,
+            ]
+        }
+        TerminalUI.table(
+            headers: ["Package", "Current", "Fix", "Worst", "Advisories"],
+            rows: rows,
+            stream: .stderr
+        )
+
+        let topAdvisories = sorted.flatMap { item in
+            let pkg = item.0
+            let advisories = item.1
+            return advisories
+                .sorted { severityOrder($0.severity) < severityOrder($1.severity) }
+                .prefix(2)
+                .map { (pkg.name, $0) }
+        }
+        if !topAdvisories.isEmpty {
+            TerminalUI.blank()
+            for (package, advisory) in topAdvisories.prefix(8) {
+                let summary = String(advisory.summary.prefix(80))
+                TerminalUI.line(
+                    "  \(advisory.severity.uppercased()) \(package): \(summary) [\(advisory.id)]",
+                    stream: .stderr
+                )
             }
-            for adv in advSorted {
-                let sev = adv.severity.uppercased()
-                    .padding(toLength: 7, withPad: " ", startingAt: 0)
-                let summary = String(adv.summary.prefix(58))
-                let padded = summary.padding(toLength: 58, withPad: " ", startingAt: 0)
-                fputs("    \(sev) \(padded) [\(adv.id)]\n", stderr)
+            if topAdvisories.count > 8 {
+                TerminalUI.hint("showing 8 advisory summaries", detail: "use `fend audit --json` for full data")
             }
-            fputs("\n", stderr)
         }
 
         var parts: [String] = []
@@ -130,7 +162,8 @@ enum AuditPrompt {
             parts.append("\(plan.noFix.count) unfixable")
         }
         if !parts.isEmpty {
-            fputs("Summary: \(parts.joined(separator: ", ")).\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.info("fix plan", detail: parts.joined(separator: ", "))
         }
     }
 
@@ -152,18 +185,18 @@ enum AuditPrompt {
         return m
     }
 
-    private static func formatHeader(pkg: LockedPackage, cls: PackageClass) -> String {
+    private static func fixText(for cls: PackageClass) -> String {
         switch cls {
         case .direct(let t):
-            return "\(pkg.name) \(pkg.version) → \(t)  [direct]"
+            return "\(t) direct"
         case .overrideEntry(let t):
-            return "\(pkg.name) \(pkg.version) → \(t)  [override]"
+            return "\(t) override"
         case .breaking(let t):
-            return "\(pkg.name) \(pkg.version) → \(t)  [BREAKING — needs --force]"
+            return "\(t) needs --force"
         case .prerelease(let t):
-            return "\(pkg.name) \(pkg.version) → \(t)  [pre-release — needs --include-prerelease]"
+            return "\(t) prerelease"
         case .noFix:
-            return "\(pkg.name) \(pkg.version)  [no patched version]"
+            return "no patched version"
         }
     }
 
@@ -189,10 +222,12 @@ extension AuditPrompt {
     static func askApplyPlan(_ plan: FixPlan) -> Bool {
         let count = plan.safeCount
         let word = count == 1 ? "fix" : "fixes"
-        fputs("\nApply \(count) \(word)? [Y/n] ", stderr)
+        TerminalUI.blank()
+        fputs("Apply \(count) \(word)? [Y/n] ", stderr)
 
         guard let tty = fopen("/dev/tty", "r") else {
-            fputs("\nfend: no tty — declining by default\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.warning("no tty available", detail: "declining by default")
             return false
         }
         defer { fclose(tty) }
@@ -216,7 +251,8 @@ extension AuditPrompt {
     static func askFixBeforeInstall(plan: FixPlan) -> FixInstallChoice {
         let count = plan.safeCount
         let word = count == 1 ? "fix" : "fixes"
-        fputs("\nApply \(count) \(word) before installing? [Y/n/c (cancel)] ", stderr)
+        TerminalUI.blank()
+        fputs("Apply \(count) \(word) before installing? [Y/n/c (cancel)] ", stderr)
 
         guard let tty = fopen("/dev/tty", "r") else {
             return .skip

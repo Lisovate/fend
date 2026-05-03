@@ -208,6 +208,9 @@ public final class Daemon {
         }
 
         let fenddFd = vsockConn.fileDescriptor
+        let networkCollector = NetworkEventCollector(vm: vmInstance)
+        networkCollector.start()
+        defer { networkCollector.stop() }
 
         // Read Ready from fendd
         do {
@@ -273,10 +276,16 @@ public final class Daemon {
         do {
             while true {
                 let response = try FramedMessage.read(from: fenddFd)
-                try response.write(to: clientFd)
                 if response.type == .exitStatus {
+                    networkCollector.stop()
+                    for event in networkCollector.snapshot {
+                        let payload = try JSONEncoder().encode(event)
+                        try FramedMessage(type: .networkEvent, payload: payload).write(to: clientFd)
+                    }
+                    try response.write(to: clientFd)
                     break
                 }
+                try response.write(to: clientFd)
             }
         } catch {
             // Connection closed

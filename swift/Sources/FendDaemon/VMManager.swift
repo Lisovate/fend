@@ -5,6 +5,12 @@ import FendCommon
 /// Manages VM instances, one per project directory.
 /// Handles VM creation, warm pool, and idle timeout.
 public final class VMManager {
+    private enum VMDecision {
+        case use(VMInstance)
+        case resume(VMInstance)
+        case start(VMInstance)
+    }
+
     private let paths: FendPaths
     /// Active VMs keyed by project directory path.
     private var vms: [String: VMInstance] = [:]
@@ -18,40 +24,43 @@ public final class VMManager {
     /// Phase 2C fix: insert VM into map before unlocking to prevent double-boot race.
     public func vmForProject(_ projectDir: URL, config: FendConfig) async throws -> VMInstance {
         let key = projectDir.standardizedFileURL.path
-
-        lock.lock()
-        if let existing = vms[key] {
-            switch existing.state {
-            case .running:
-                lock.unlock()
-                return existing
-            case .paused:
-                lock.unlock()
-                try await existing.resume()
-                return existing
-            case .stopped, .error:
-                break
-            case .booting:
-                lock.unlock()
-                return existing
+        let decision = try lock.withLock { () throws -> VMDecision in
+            if let existing = vms[key] {
+                switch existing.state {
+                case .running, .booting:
+                    return .use(existing)
+                case .paused:
+                    return .resume(existing)
+                case .stopped, .error:
+                    break
+                }
             }
+
+            // Insert before unlocking so concurrent callers see .booting state (Phase 2C).
+            let vm = try VMInstance(projectDir: projectDir, config: config, paths: paths)
+            vms[key] = vm
+            return .start(vm)
         }
 
-        // Insert before unlocking so concurrent callers see .booting state (Phase 2C)
-        let vm = try VMInstance(projectDir: projectDir, config: config, paths: paths)
-        vms[key] = vm
-        lock.unlock()
-
-        try await vm.start()
-        return vm
+        switch decision {
+        case .use(let vm):
+            return vm
+        case .resume(let vm):
+            try await vm.resume()
+            return vm
+        case .start(let vm):
+            try await vm.start()
+            return vm
+        }
     }
 
     /// Stop all managed VMs.
     public func stopAll() {
-        lock.lock()
-        let allVMs = vms.values
-        vms.removeAll()
-        lock.unlock()
+        let allVMs = lock.withLock {
+            let snapshot = Array(vms.values)
+            vms.removeAll()
+            return snapshot
+        }
         for vm in allVMs {
             vm.forceStop()
         }
@@ -62,23 +71,24 @@ public final class VMManager {
     /// vs ~800ms cold boot, so the staircase keeps warm resume snappy for
     /// recent projects without holding memory indefinitely.
     public func reapIdle(pauseAfter: TimeInterval, stopAfter: TimeInterval) {
-        lock.lock()
-        let now = Date()
-        var toPause: [VMInstance] = []
-        var toStopKeys: [String] = []
-        for (key, vm) in vms {
-            let idle = now.timeIntervalSince(vm.lastUsed)
-            switch vm.state {
-            case .running where idle > pauseAfter:
-                toPause.append(vm)
-            case .paused where idle > stopAfter:
-                toStopKeys.append(key)
-            default:
-                break
+        let (toPause, toStop) = lock.withLock { () -> ([VMInstance], [VMInstance]) in
+            let now = Date()
+            var toPause: [VMInstance] = []
+            var toStopKeys: [String] = []
+            for (key, vm) in vms {
+                let idle = now.timeIntervalSince(vm.lastUsed)
+                switch vm.state {
+                case .running where idle > pauseAfter:
+                    toPause.append(vm)
+                case .paused where idle > stopAfter:
+                    toStopKeys.append(key)
+                default:
+                    break
+                }
             }
+            let toStop = toStopKeys.compactMap { vms.removeValue(forKey: $0) }
+            return (toPause, toStop)
         }
-        let toStop = toStopKeys.compactMap { vms.removeValue(forKey: $0) }
-        lock.unlock()
 
         for vm in toPause {
             fputs("fend: pausing idle VM for \(vm.projectDir.lastPathComponent)\n", stderr)
@@ -105,9 +115,7 @@ public final class VMManager {
 
     /// Get status of all running VMs.
     public func status() -> [VMInfo] {
-        lock.lock()
-        let snapshot = Array(vms.values)
-        lock.unlock()
+        let snapshot = lock.withLock { Array(vms.values) }
 
         let now = Date()
         return snapshot.map { vm in
@@ -123,12 +131,7 @@ public final class VMManager {
     /// Stop the VM for a specific project directory.
     public func stopVM(forProjectDir dir: String) -> Bool {
         let key = URL(fileURLWithPath: dir).standardizedFileURL.path
-        lock.lock()
-        guard let vm = vms.removeValue(forKey: key) else {
-            lock.unlock()
-            return false
-        }
-        lock.unlock()
+        guard let vm = lock.withLock({ vms.removeValue(forKey: key) }) else { return false }
         vm.forceStop()
         return true
     }
@@ -152,13 +155,9 @@ public final class VMManager {
             let pathFile = entry.appendingPathComponent("project-path")
 
             // Skip if this hash belongs to a live VM.
-            var isLive = false
-            lock.lock()
-            for vm in vms.values where FendPaths.projectHash(for: vm.projectDir) == hash {
-                isLive = true
-                break
+            let isLive = lock.withLock {
+                vms.values.contains { FendPaths.projectHash(for: $0.projectDir) == hash }
             }
-            lock.unlock()
             if isLive { continue }
 
             // Reason 1: sidecar says the project dir is gone.

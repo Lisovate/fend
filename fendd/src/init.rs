@@ -142,8 +142,8 @@ fn mount_virtiofs() {
         bind_mount_readonly(&git_dir);
     }
 
-    std::fs::create_dir_all("/root/.npm").ok();
-    mount("cache", "/root/.npm", "virtiofs");
+    std::fs::create_dir_all("/home/user/.npm").ok();
+    mount("cache", "/home/user/.npm", "virtiofs");
 
     std::fs::create_dir_all("/opt/tools").ok();
     mount("tools", "/opt/tools", "virtiofs");

@@ -14,6 +14,7 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(MessageType.ready.rawValue, 6)
         XCTAssertEqual(MessageType.inputData.rawValue, 7)
         XCTAssertEqual(MessageType.windowSize.rawValue, 8)
+        XCTAssertEqual(MessageType.networkEvent.rawValue, 9)
         XCTAssertEqual(MessageType.daemonRun.rawValue, 10)
         XCTAssertEqual(MessageType.daemonError.rawValue, 11)
         XCTAssertEqual(MessageType.daemonStatus.rawValue, 12)
@@ -141,6 +142,15 @@ final class ProtocolTests: XCTestCase {
         let decoded = try JSONDecoder().decode(WindowSize.self, from: data)
         XCTAssertEqual(decoded.rows, 24)
         XCTAssertEqual(decoded.cols, 80)
+    }
+
+    func testNetworkEventCodable() throws {
+        let msg = NetworkEvent(remote: "93.184.216.34", port: 443, state: "established")
+        let data = try JSONEncoder().encode(msg)
+        let decoded = try JSONDecoder().decode(NetworkEvent.self, from: data)
+        XCTAssertEqual(decoded.remote, "93.184.216.34")
+        XCTAssertEqual(decoded.port, 443)
+        XCTAssertEqual(decoded.state, "established")
     }
 
     func testDaemonRunRequestCodable() throws {

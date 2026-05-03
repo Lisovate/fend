@@ -58,6 +58,7 @@ pub fn handle(conn: VsockStream) {
         }
         Err(()) => return,
     };
+    let command_id = cmd.id;
 
     loop {
         let (msg_type, payload) = match read_frame(&mut reader) {
@@ -68,6 +69,10 @@ pub fn handle(conn: VsockStream) {
         match msg_type {
             MessageType::InputData => {
                 if let Ok(input) = serde_json::from_slice::<InputData>(&payload) {
+                    if input.id != command_id {
+                        eprintln!("fendd: ignoring input for stale command id {}", input.id);
+                        continue;
+                    }
                     if input.data.is_empty() {
                         child_stdin.take();
                     } else if let Some(bytes) = base64_decode(&input.data) {
@@ -84,6 +89,10 @@ pub fn handle(conn: VsockStream) {
             }
             MessageType::ForwardSignal => {
                 if let Ok(sig) = serde_json::from_slice::<ForwardSignal>(&payload) {
+                    if sig.id != command_id {
+                        eprintln!("fendd: ignoring signal for stale command id {}", sig.id);
+                        continue;
+                    }
                     eprintln!("fendd: forwarding signal {} to pid {}", sig.signal, pid);
                     unsafe {
                         libc::kill(pid as i32, sig.signal);
@@ -93,6 +102,10 @@ pub fn handle(conn: VsockStream) {
             MessageType::WindowSize => {
                 if let Some(fd) = master_fd {
                     if let Ok(ws) = serde_json::from_slice::<WindowSizeMsg>(&payload) {
+                        if ws.id != command_id {
+                            eprintln!("fendd: ignoring window size for stale command id {}", ws.id);
+                            continue;
+                        }
                         let winsize = libc::winsize {
                             ws_row: ws.rows,
                             ws_col: ws.cols,

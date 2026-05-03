@@ -13,6 +13,8 @@ public struct AuditEntry: Codable {
     public var exitCode: Int32
     public var audit: AuditSummary?
     public var network: [String]?
+    public var networkMode: String?
+    public var networkEvents: [NetworkEvent]?
     public var fsDiff: FsDiffSummary?
 
     public init(
@@ -25,6 +27,8 @@ public struct AuditEntry: Codable {
         exitCode: Int32,
         audit: AuditSummary? = nil,
         network: [String]? = nil,
+        networkMode: String? = nil,
+        networkEvents: [NetworkEvent]? = nil,
         fsDiff: FsDiffSummary? = nil
     ) {
         self.timestamp = timestamp
@@ -36,6 +40,8 @@ public struct AuditEntry: Codable {
         self.exitCode = exitCode
         self.audit = audit
         self.network = network
+        self.networkMode = networkMode
+        self.networkEvents = networkEvents
         self.fsDiff = fsDiff
     }
 }
@@ -46,7 +52,7 @@ public struct AuditSummary: Codable {
     public var totalPackages: Int
     public var findings: Int
     public var bySeverity: [String: Int]
-    public var decision: String // "clean" | "approved" | "blocked" | "skipped"
+    public var decision: String // "clean" | "approved" | "blocked" | "denied" | "skipped"
 
     public init(totalPackages: Int, findings: Int, bySeverity: [String: Int], decision: String) {
         self.totalPackages = totalPackages
@@ -60,10 +66,19 @@ public struct AuditSummary: Codable {
 public struct FsDiffSummary: Codable {
     public var outsideNodeModules: Int
     public var touchedFiles: [String]
+    public var risk: String?
+    public var sensitiveFiles: [String]?
 
-    public init(outsideNodeModules: Int, touchedFiles: [String]) {
+    public init(
+        outsideNodeModules: Int,
+        touchedFiles: [String],
+        risk: String? = nil,
+        sensitiveFiles: [String]? = nil
+    ) {
         self.outsideNodeModules = outsideNodeModules
         self.touchedFiles = touchedFiles
+        self.risk = risk
+        self.sensitiveFiles = sensitiveFiles
     }
 }
 
@@ -82,7 +97,7 @@ public enum AuditLog {
 
         if let fh = try? FileHandle(forWritingTo: url) {
             defer { try? fh.close() }
-            try? fh.seekToEnd()
+            _ = try? fh.seekToEnd()
             try? fh.write(contentsOf: line)
         } else {
             // File doesn't exist yet — create it with the first line.

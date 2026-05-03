@@ -32,11 +32,11 @@ enum AuditEngine {
         do {
             (packages, _) = try NPMLockfile.load(from: projectDir)
         } catch LockfileError.notFound {
-            fputs("fend: no package-lock.json — skipping audit.\n", stderr)
-            fputs("      run `npm install --package-lock-only` first to enable auditing.\n", stderr)
+            TerminalUI.warning("audit skipped", detail: "no package-lock.json")
+            TerminalUI.hint("run `npm install --package-lock-only` first to enable auditing")
             return AuditReport(totalPackages: 0, findings: [], decision: .skipped)
         } catch LockfileError.unsupportedFormat(let m) {
-            fputs("fend: \(m) — skipping audit.\n", stderr)
+            TerminalUI.warning("audit skipped", detail: m)
             return AuditReport(totalPackages: 0, findings: [], decision: .skipped)
         }
 
@@ -49,12 +49,13 @@ enum AuditEngine {
         // --update-db dance. Detail fetches are cached per advisory ID.
         let cache = AuditCache(paths: paths)
         let results: [AdvisoryResult]
-        fputs("fend: auditing \(packages.count) package(s) against OSV.dev…\n", stderr)
+        TerminalUI.step("auditing dependencies", detail: "\(packages.count) packages via OSV.dev")
         let started = Date()
         do {
             results = try await OSVClient.query(packages: packages, cache: cache)
         } catch {
-            fputs("fend: audit failed: \(error) — continuing (policy=\(policy.level.rawValue))\n", stderr)
+            TerminalUI.warning("audit unavailable", detail: TerminalUI.describe(error))
+            TerminalUI.hint("continuing because audit policy is \(policy.level.rawValue)")
             if policy.level == .strict {
                 throw AuditEngineError.networkUnavailable("audit required but OSV unreachable: \(error)")
             }

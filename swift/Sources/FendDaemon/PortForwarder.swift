@@ -84,7 +84,7 @@ public final class PortForwarder: @unchecked Sendable {
             currentDelay = baseDelay
 
             let fd = conn.fileDescriptor
-            fputs("fend: port monitor connected\n", stderr)
+            writeDaemonStatusLine("port monitor connected")
 
             while monitoring {
                 do {
@@ -128,7 +128,7 @@ public final class PortForwarder: @unchecked Sendable {
         proxies[port] = proxy
         lock.unlock()
 
-        fputs("fend: forwarding localhost:\(port) → vm:\(port)\n", stderr)
+        writeDaemonStatusLine("forwarding localhost:\(port) → vm:\(port)")
         proxy.start()
     }
 
@@ -138,10 +138,29 @@ public final class PortForwarder: @unchecked Sendable {
         lock.unlock()
 
         if let proxy {
-            fputs("fend: stopped forwarding localhost:\(port)\n", stderr)
+            writeDaemonStatusLine("stopped forwarding localhost:\(port)")
             proxy.stop()
         }
     }
+}
+
+private func writeDaemonStatusLine(_ line: String) {
+    guard daemonVerboseEnabled() else { return }
+    let newline = isatty(STDERR_FILENO) != 0 ? "\r\n" : "\n"
+    fputs("debug \(line)" + newline, stderr)
+}
+
+private func daemonVerboseEnabled() -> Bool {
+    let env = ProcessInfo.processInfo.environment
+    return truthy(env["FEND_VERBOSE"]) || truthy(env["DEBUG"])
+}
+
+private func truthy(_ value: String?) -> Bool {
+    guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+          !raw.isEmpty else {
+        return false
+    }
+    return raw != "0" && raw != "false" && raw != "no" && raw != "off"
 }
 
 // MARK: - PortProxy
@@ -194,7 +213,7 @@ private final class PortProxy: @unchecked Sendable {
             }
         }
         guard bindResult == 0 else {
-            fputs("fend: bind localhost:\(hostPort) failed: \(String(cString: strerror(errno)))\n", stderr)
+            writeDaemonStatusLine("bind localhost:\(hostPort) failed: \(String(cString: strerror(errno)))")
             Darwin.close(listenFd)
             listenFd = -1
             return

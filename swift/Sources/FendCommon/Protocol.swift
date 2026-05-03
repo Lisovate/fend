@@ -9,6 +9,9 @@ public let vsockPortEvents: UInt32 = 1025
 /// Port used by fendd port-forward data connections inside the VM.
 public let vsockPortForward: UInt32 = 1026
 
+/// Port used by fendd outbound-network event stream inside the VM.
+public let vsockPortNetworkEvents: UInt32 = 1027
+
 // MARK: - Host → Guest Messages
 
 /// Command execution request sent from host CLI to guest agent.
@@ -113,6 +116,19 @@ public struct PortEvent: Codable {
     }
 }
 
+/// Notification that the guest observed an outbound TCP connection attempt.
+public struct NetworkEvent: Codable, Hashable {
+    public let remote: String
+    public let port: UInt16
+    public let state: String
+
+    public init(remote: String, port: UInt16, state: String) {
+        self.remote = remote
+        self.port = port
+        self.state = state
+    }
+}
+
 // MARK: - Wire Protocol
 
 /// Message types for the binary framing protocol over vsock.
@@ -125,6 +141,7 @@ public enum MessageType: UInt8, Codable {
     case ready = 6
     case inputData = 7
     case windowSize = 8
+    case networkEvent = 9
     // Daemon protocol (CLI ↔ daemon)
     case daemonRun = 10
     case daemonError = 11

@@ -28,7 +28,7 @@ struct Hook: ParsableCommand {
     /// `fend on` is active. Wider coverage = fewer escape hatches for scripts
     /// that fork to an unwrapped tool, but also more startup overhead, so we
     /// stop at package managers + runtime entry points.
-    private let shimmedCommands = [
+    private static let shimmedCommands = [
         "npm", "npx",
         "bun", "bunx",
         "yarn",
@@ -40,7 +40,7 @@ struct Hook: ParsableCommand {
     ]
 
     private var zshHook: String {
-        let cmds = shimmedCommands.joined(separator: " ")
+        let cmds = Self.shimmedCommands.joined(separator: " ")
         return """
         # fend shell integration
         _fend_active=0
@@ -79,7 +79,7 @@ struct Hook: ParsableCommand {
     }
 
     private var bashHook: String {
-        let cmds = shimmedCommands.joined(separator: " ")
+        let cmds = Self.shimmedCommands.joined(separator: " ")
         return """
         # fend shell integration
         _fend_active=0

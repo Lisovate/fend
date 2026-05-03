@@ -50,7 +50,7 @@ struct Audit: AsyncParsableCommand {
 
         if updateDb {
             AuditCache(paths: paths).clear()
-            fputs("fend: cleared audit cache.\n", stderr)
+            TerminalUI.success("audit cache cleared")
         }
 
         // Audit always runs at "warn" here — we're just looking, not gating an
@@ -73,7 +73,7 @@ struct Audit: AsyncParsableCommand {
                 paths: paths
             )
         } catch {
-            fputs("fend: audit failed: \(error)\n", stderr)
+            TerminalUI.error("audit failed", detail: TerminalUI.describe(error))
             throw ExitCode(1)
         }
 
@@ -103,26 +103,28 @@ struct Audit: AsyncParsableCommand {
 
         // --fix path.
         if !plan.hasSafe {
-            fputs("\nfend audit --fix: nothing to auto-fix.\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.warning("nothing to auto-fix")
             if !plan.breaking.isEmpty {
-                fputs("  \(plan.breaking.count) advisor\(plan.breaking.count == 1 ? "y requires" : "ies require") a major bump — re-run with --force.\n", stderr)
+                TerminalUI.hint("\(plan.breaking.count) advisor\(plan.breaking.count == 1 ? "y requires" : "ies require") a major bump", detail: "re-run with --force")
             }
             if !plan.prerelease.isEmpty {
-                fputs("  \(plan.prerelease.count) advisor\(plan.prerelease.count == 1 ? "y is" : "ies are") only patched in a pre-release — re-run with --include-prerelease.\n", stderr)
+                TerminalUI.hint("\(plan.prerelease.count) advisor\(plan.prerelease.count == 1 ? "y is" : "ies are") only patched in a pre-release", detail: "re-run with --include-prerelease")
             }
             if !plan.noFix.isEmpty {
-                fputs("  \(plan.noFix.count) advisor\(plan.noFix.count == 1 ? "y has" : "ies have") no patched version.\n", stderr)
+                TerminalUI.hint("\(plan.noFix.count) advisor\(plan.noFix.count == 1 ? "y has" : "ies have") no patched version")
             }
             throw ExitCode(1)
         }
 
         if dryRun {
-            fputs("\nfend audit --fix --dry-run: no changes applied.\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.info("dry run", detail: "no changes applied")
             return
         }
 
         if !yes && !AuditPrompt.askApplyPlan(plan) {
-            fputs("fend: fix cancelled.\n", stderr)
+            TerminalUI.warning("fix cancelled")
             throw ExitCode(130)
         }
 
@@ -130,15 +132,15 @@ struct Audit: AsyncParsableCommand {
     }
 
     private func printNextSteps(plan: FixPlan) {
-        fputs("\n", stderr)
+        TerminalUI.blank()
         if plan.hasSafe {
-            fputs("Run `fend audit --fix` to apply \(plan.safeCount) safe fix(es).\n", stderr)
+            TerminalUI.hint("run `fend audit --fix`", detail: "apply \(plan.safeCount) safe fix(es)")
         }
         if !plan.breaking.isEmpty {
-            fputs("Run `fend audit --fix --force` to also apply \(plan.breaking.count) major bump(s).\n", stderr)
+            TerminalUI.hint("run `fend audit --fix --force`", detail: "also apply \(plan.breaking.count) major bump(s)")
         }
         if !plan.prerelease.isEmpty {
-            fputs("Run `fend audit --fix --include-prerelease` to apply \(plan.prerelease.count) pre-release fix(es).\n", stderr)
+            TerminalUI.hint("run `fend audit --fix --include-prerelease`", detail: "apply \(plan.prerelease.count) pre-release fix(es)")
         }
     }
 
@@ -154,11 +156,12 @@ struct Audit: AsyncParsableCommand {
     ) async throws {
         let overrideKeys = try FixApplier.writeOverrides(plan, projectDir: projectDir)
         if !overrideKeys.isEmpty {
-            fputs("fend: wrote \(overrideKeys.count) override(s) to package.json.\n", stderr)
+            TerminalUI.success("package.json updated", detail: "\(overrideKeys.count) override(s)")
         }
 
         let installCmd = FixApplier.installArgv(for: plan)
-        fputs("fend: applying fix via `\(installCmd.joined(separator: " "))`…\n\n", stderr)
+        TerminalUI.step("applying fix", detail: "`\(installCmd.joined(separator: " "))`")
+        TerminalUI.blank()
 
         try await Run.execute(command: installCmd, extraEnv: [:], claudeMode: false)
     }

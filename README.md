@@ -44,6 +44,7 @@ fend npm install
 fend npm run dev        # dev server runs in the VM, port 3000 forwards to host
 fend npm test
 fend node scripts/seed.js
+fend --network off npm test
 ```
 
 ### Shell hook (no prefix)
@@ -79,16 +80,53 @@ fend audit --json        # structured output for CI
 The audit also runs automatically before `fend npm install`. Findings show up as:
 
 ```
-fend audit: 3 advisories in 2 of 412 packages (1.1s, worst HIGH)
+warn  3 advisories found  worst HIGH
+  packages  2 of 412 packages
+  duration  1.1s
 
-  minimist 1.2.0 → 1.2.6  [override]
-    HIGH    Prototype pollution in minimist               [GHSA-xvch-5gv4-984h]
-    MEDIUM  ReDoS in argument parsing                     [GHSA-vh95-rmgr-6w4m]
+Package   Current  Fix                 Worst     Advisories
+minimist  1.2.0    1.2.6 override      HIGH      GHSA-xvch-5gv4-984h
+lodash    3.10.1   4.17.21 needs --force CRITICAL GHSA-jf85-cpcp-j695
 
-  lodash 3.10.1 → 4.17.21  [BREAKING — needs --force]
-    CRITICAL Prototype pollution in defaultsDeep          [GHSA-jf85-cpcp-j695]
+  HIGH minimist: Prototype pollution in minimist [GHSA-xvch-5gv4-984h]
+  CRITICAL lodash: Prototype pollution in defaultsDeep [GHSA-jf85-cpcp-j695]
 
-Summary: 1 auto-fixable, 1 major bump (--force).
+info  fix plan  1 auto-fixable, 1 major bump (--force)
+```
+
+### Planned: AI-assisted package review
+
+Fend's install flow is designed to support a future AI review gate between
+`npm install --ignore-scripts` and `npm rebuild`: install packages without
+lifecycle scripts first, collect evidence about risky/new/scripted packages,
+ask an AI reviewer for a structured verdict, then decide whether scripts should
+run.
+
+The first integration target is [`agent-ws`](https://www.npmjs.com/package/agent-ws),
+a local WebSocket bridge for Claude Code and Codex CLI. That keeps provider
+tokens outside Fend by default and lets users reuse their existing CLI agent
+authentication. The intended role is advisory/gating support — AI can explain
+and flag suspicious dependency behavior, but it cannot prove a package is safe.
+
+Likely review inputs:
+
+- new or changed packages from the lockfile
+- lifecycle scripts (`preinstall`, `install`, `postinstall`, `prepare`)
+- selected package files such as `package.json` and install scripts
+- OSV audit findings
+- network and filesystem evidence from the sandbox
+
+Possible future config shape:
+
+```toml
+[ai]
+enabled = false
+provider = "agent-ws"               # agent-ws | openai | anthropic
+url = "ws://localhost:9999"
+token_env = "FEND_AGENT_WS_TOKEN"
+mode = "report"                     # report | warn | block
+scope = "risky"                     # risky | new | direct | all
+max_packages = 25
 ```
 
 ### Run Claude Code sandboxed
@@ -114,6 +152,9 @@ bun  = "1.1"
 cpus = 2
 memory = "2GB"
 
+[network]
+mode = "on"                         # on | off
+
 [audit]
 level = "strict"                     # strict | warn | off
 rebuild = true                       # run `npm rebuild` after a clean audit
@@ -126,6 +167,38 @@ include_prerelease = false           # consider pre-release versions when fixing
 
 Generate one with `fend init`.
 
+Use `mode = "off"` or `fend --network off <command>` for commands that should
+not reach the internet, such as tests or risky install-script rebuilds. The
+network mode is recorded in `fend log` for later review.
+
+Useful log filters:
+
+```bash
+fend log --network off
+fend log --network-events
+fend log --fs-risk high
+fend log --audit-decision blocked
+fend log --failed
+```
+
+Use `fend log --json` to inspect structured filesystem and network evidence
+for a specific run.
+
+### Terminal output
+
+Human output is intentionally compact: status labels, small tables, and hints
+for common failure modes. Guest command stdout/stderr is passed through
+unchanged so tools like `npm`, `node`, and test runners still behave normally.
+
+Useful environment controls:
+
+```bash
+NO_COLOR=1 fend npm test          # disable ANSI colors
+FEND_VERBOSE=1 fend npm run dev   # include daemon/debug status lines
+FEND_QUIET=1 fend npm test        # suppress non-warning host status
+FEND_FORCE_COLOR=1 fend log       # force color even when auto-detection says no
+```
+
 ---
 
 ## How it works
@@ -134,7 +207,10 @@ Generate one with `fend init`.
 
 A small Rust binary (`fendd`) runs as PID 1 inside the VM, talks to the host over virtio-vsock, manages port forwarding, and supervises the user's command.
 
-The VM can read/write the project directory and reach the network. It cannot see `~/.ssh`, `~/.aws`, `~/Library`, `~/.gnupg`, `.env` files outside the project, or any other path on the host.
+The VM can read/write the project directory and, by default, reach the network.
+Per-command network access can be disabled with `--network off`. It cannot see
+`~/.ssh`, `~/.aws`, `~/Library`, `~/.gnupg`, `.env` files outside the project,
+or any other path on the host.
 
 For deep architecture detail — VM lifecycle, scenarios, file-watching/HMR strategy, VirtioFS performance, system diagrams — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
@@ -172,7 +248,7 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 - **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
 - **Next:** macOS Intel.
 - **Then:** Linux (Firecracker), Windows (WSL2).
-- **Later:** macOS app with secrets vault and dashboard, IDE integration.
+- **Later:** AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
 
 Issues, bug reports, and PRs welcome.
 

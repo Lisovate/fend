@@ -21,6 +21,7 @@ pub enum MessageType {
     Ready = 6,
     InputData = 7,
     WindowSize = 8,
+    NetworkEvent = 9,
 }
 
 impl MessageType {
@@ -34,6 +35,7 @@ impl MessageType {
             6 => Some(Self::Ready),
             7 => Some(Self::InputData),
             8 => Some(Self::WindowSize),
+            9 => Some(Self::NetworkEvent),
             _ => None,
         }
     }
@@ -92,11 +94,23 @@ pub struct PortEventMsg {
     pub event: String, // "opened" or "closed"
 }
 
+#[derive(Debug, Serialize)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct NetworkEventMsg {
+    pub remote: String,
+    pub port: u16,
+    pub state: String, // "syn_sent" or "established"
+}
+
 /// Vsock port for port-event stream (daemon subscribes here).
 pub const VSOCK_PORT_EVENTS: u32 = 1025;
 
 /// Vsock port for port-forward data connections.
 pub const VSOCK_PORT_FORWARD: u32 = 1026;
+
+/// Vsock port for outbound-network event stream.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub const VSOCK_PORT_NETWORK_EVENTS: u32 = 1027;
 
 // ── Wire Protocol ───────────────────────────────────────────────────
 // Frame: [type: 1 byte][length: 4 bytes big-endian][payload: N bytes]
@@ -265,12 +279,13 @@ mod tests {
         assert_eq!(MessageType::from_u8(6), Some(MessageType::Ready));
         assert_eq!(MessageType::from_u8(7), Some(MessageType::InputData));
         assert_eq!(MessageType::from_u8(8), Some(MessageType::WindowSize));
+        assert_eq!(MessageType::from_u8(9), Some(MessageType::NetworkEvent));
     }
 
     #[test]
     fn test_message_type_from_u8_invalid() {
         assert_eq!(MessageType::from_u8(0), None);
-        assert_eq!(MessageType::from_u8(9), None);
+        assert_eq!(MessageType::from_u8(10), None);
         assert_eq!(MessageType::from_u8(255), None);
     }
 
@@ -288,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_frame_roundtrip_all_types() {
-        for type_val in [1u8, 2, 3, 4, 5, 6, 7, 8] {
+        for type_val in [1u8, 2, 3, 4, 5, 6, 7, 8, 9] {
             let msg_type = MessageType::from_u8(type_val).unwrap();
             let payload = b"test payload";
 

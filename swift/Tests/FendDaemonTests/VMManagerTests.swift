@@ -18,11 +18,11 @@ final class VMManagerTests: XCTestCase {
         manager.stopAll()
     }
 
-    func testStopIdleVMsOnEmptyManagerIsSafe() {
+    func testReapIdleOnEmptyManagerIsSafe() {
         let paths = FendPaths()
         let manager = VMManager(paths: paths)
         // Should not crash or throw
-        manager.stopIdleVMs(olderThan: 60)
+        manager.reapIdle(pauseAfter: 60, stopAfter: 360)
     }
 
     func testStatusOnEmptyManagerReturnsEmpty() {

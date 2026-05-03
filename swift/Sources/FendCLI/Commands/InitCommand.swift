@@ -15,7 +15,7 @@ struct Init: ParsableCommand {
         let target = cwd.appendingPathComponent(".fend.toml")
 
         if FileManager.default.fileExists(atPath: target.path) && !force {
-            fputs("fend: .fend.toml already exists — pass --force to overwrite.\n", stderr)
+            TerminalUI.warning(".fend.toml already exists", detail: "pass --force to overwrite")
             throw ExitCode(1)
         }
 
@@ -23,7 +23,7 @@ struct Init: ParsableCommand {
         let content = template(for: kind)
 
         try content.write(to: target, atomically: true, encoding: .utf8)
-        print("fend: wrote .fend.toml (\(kind.label))")
+        TerminalUI.success("wrote .fend.toml", detail: kind.label)
     }
 
     private func template(for kind: ProjectKind) -> String {
@@ -47,6 +47,9 @@ struct Init: ParsableCommand {
             "[vm]",
             "# cpus = 2           # uncomment to override (default: 2)",
             "# memory = \"2GB\"     # uncomment to override (default: 2GB)",
+            "",
+            "[network]",
+            "mode = \"on\"                    # on | off",
             "",
             "[audit]",
             "# Audit every install against OSV.dev before running lifecycle scripts.",

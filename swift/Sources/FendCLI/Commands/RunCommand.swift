@@ -4,6 +4,11 @@ import FendCommon
 import FendDaemon
 
 struct Run: AsyncParsableCommand {
+    private struct RunResult {
+        let exitCode: Int32
+        let networkEvents: [NetworkEvent]
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "run",
         abstract: "Run a command in the sandbox (default subcommand)",
@@ -18,6 +23,10 @@ struct Run: AsyncParsableCommand {
             help: "Load env vars from a .env-style file. Repeatable; later files win on conflict.")
     var envFile: [String] = []
 
+    @Option(name: .long,
+            help: "Network policy for this command: on or off. Overrides [network].mode.")
+    var network: String?
+
     @Argument(parsing: .captureForPassthrough, help: "Command and arguments to run in the sandbox")
     var command: [String] = []
 
@@ -26,18 +35,29 @@ struct Run: AsyncParsableCommand {
             throw ValidationError("No command specified. Usage: fend <command> [args...]")
         }
         let extra = try parseExtraEnv(pairs: env, files: envFile)
-        try await Run.execute(command: command, extraEnv: extra, claudeMode: false)
+        let networkOverride = try parseNetworkOverride(network)
+        try await Run.execute(
+            command: command,
+            extraEnv: extra,
+            claudeMode: false,
+            networkOverride: networkOverride
+        )
     }
 
     /// Execute a command in the sandbox. Shared by `fend <cmd>` and `fend claude <cmd>`.
-    static func execute(command: [String], extraEnv: [String: String], claudeMode: Bool) async throws {
+    static func execute(
+        command: [String],
+        extraEnv: [String: String],
+        claudeMode: Bool,
+        networkOverride: NetworkMode? = nil
+    ) async throws {
         // Bail out early on obvious argparse mistakes (e.g. `fend --update-db`
         // where the user meant `fend audit --update-db`). Without this we'd
         // boot a VM just to have fendd fail with ENOENT on `--update-db`.
         if let first = command.first, first.hasPrefix("-"), first != "-" {
-            fputs("fend: '\(first)' looks like a flag, not a command.\n", stderr)
-            fputs("      Top-level flags go before the subcommand; use `fend <subcommand> \(first)`.\n", stderr)
-            fputs("      Run `fend --help` to see available subcommands.\n", stderr)
+            TerminalUI.error("'\(first)' looks like a flag, not a command")
+            TerminalUI.hint("top-level flags go before the subcommand")
+            TerminalUI.hint("try `fend <subcommand> \(first)` or run `fend --help`")
             throw ExitCode(2)
         }
 
@@ -45,6 +65,7 @@ struct Run: AsyncParsableCommand {
         let paths = FendPaths()
         try paths.ensureDirectories()
         let config = FendConfig.load(from: projectDir)
+        let networkMode = networkOverride ?? config.network.mode
 
         // Install-intent detection + audit. Must happen BEFORE enableRawMode()
         // so the interactive prompt reads a normal line from the tty.
@@ -94,12 +115,13 @@ struct Run: AsyncParsableCommand {
                             extraFlags: intent.extraFlags
                         )
                         finalCommand = merged.twoPhaseCommand(rebuild: config.audit.rebuild)
-                        fputs("fend: applying fixes and running install…\n\n", stderr)
+                        TerminalUI.success("applying fixes", detail: "then running install")
+                        TerminalUI.blank()
                         fixApplied = true
                     case .skip:
                         break // fall through to policy prompt
                     case .cancel:
-                        fputs("fend: install cancelled.\n", stderr)
+                        TerminalUI.warning("install cancelled")
                         Foundation.exit(130)
                     }
                 }
@@ -118,7 +140,7 @@ struct Run: AsyncParsableCommand {
 
                 switch report.decision {
                 case .blocked:
-                    fputs("fend: aborting — policy=\(config.audit.level.rawValue) blocks severity \(report.worstSeverity).\n", stderr)
+                    TerminalUI.error("install blocked", detail: "policy=\(config.audit.level.rawValue), worst=\(report.worstSeverity)")
                     AuditLog.append(AuditEntry(
                         timestamp: AuditLog.now(),
                         project: projectDir.path,
@@ -127,11 +149,12 @@ struct Run: AsyncParsableCommand {
                         envKeys: [],
                         durationMs: 0,
                         exitCode: 2,
-                        audit: auditSummary
+                        audit: auditSummary,
+                        networkMode: networkMode.rawValue
                     ), paths: paths)
                     Foundation.exit(2)
                 case .denied:
-                    fputs("fend: install cancelled.\n", stderr)
+                    TerminalUI.warning("install cancelled")
                     AuditLog.append(AuditEntry(
                         timestamp: AuditLog.now(),
                         project: projectDir.path,
@@ -140,7 +163,8 @@ struct Run: AsyncParsableCommand {
                         envKeys: [],
                         durationMs: 0,
                         exitCode: 130,
-                        audit: auditSummary
+                        audit: auditSummary,
+                        networkMode: networkMode.rawValue
                     ), paths: paths)
                     Foundation.exit(130)
                 case .clean, .approved:
@@ -172,9 +196,10 @@ struct Run: AsyncParsableCommand {
         for key in passthrough {
             if let val = hostEnv[key] { env[key] = val }
         }
-        env["FEND_PROJECT"] = projectDir.lastPathComponent
-
         for (k, v) in extraEnv { env[k] = v }
+
+        env["FEND_PROJECT"] = projectDir.lastPathComponent
+        env["FEND_NETWORK_MODE"] = networkMode.rawValue
 
         if claudeMode, let token = extractClaudeOAuthToken() {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -215,15 +240,26 @@ struct Run: AsyncParsableCommand {
         let start = CFAbsoluteTimeGetCurrent()
 
         // Try daemon first, then auto-start, then direct boot
-        let exitCode: Int32
-        if let code = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
-            exitCode = code
-        } else if autoStartDaemon(fendPath: ProcessInfo.processInfo.arguments[0]),
-                  let code = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
-            exitCode = code
-        } else {
-            exitCode = try await runDirect(paths: paths, projectDir: projectDir, command: finalCommand, env: env, start: start, tty: isTTY)
+        let runResult: RunResult
+        do {
+            if let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
+                runResult = result
+            } else if autoStartDaemon(fendPath: ProcessInfo.processInfo.arguments[0]),
+                      let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
+                runResult = result
+            } else {
+                runResult = try await runDirect(paths: paths, projectDir: projectDir, command: finalCommand, env: env, start: start, tty: isTTY)
+            }
+        } catch {
+            if isTTY {
+                restoreTerminal()
+            }
+            TerminalUI.error("sandbox failed", detail: TerminalUI.describe(error))
+            SignalState.shared.fd = -1
+            _ = sigwinchSource
+            Foundation.exit(1)
         }
+        let exitCode = runResult.exitCode
 
         if isTTY {
             restoreTerminal()
@@ -249,8 +285,15 @@ struct Run: AsyncParsableCommand {
             durationMs: durationMs,
             exitCode: exitCode,
             audit: auditSummary,
+            networkMode: networkMode.rawValue,
+            networkEvents: runResult.networkEvents.isEmpty ? nil : Array(runResult.networkEvents.prefix(100)),
             fsDiff: fsDiff
         ), paths: paths)
+
+        if exitCode != 0, networkMode == .off {
+            TerminalUI.blank()
+            TerminalUI.hint("network is off", detail: "DNS and outbound connections are blocked inside the sandbox")
+        }
 
         SignalState.shared.fd = -1
         _ = sigwinchSource
@@ -259,8 +302,16 @@ struct Run: AsyncParsableCommand {
         Foundation.exit(exitCode)
     }
 
+    private func parseNetworkOverride(_ raw: String?) throws -> NetworkMode? {
+        guard let raw else { return nil }
+        guard let mode = NetworkMode.parse(raw) else {
+            throw ValidationError("--network must be 'on' or 'off'")
+        }
+        return mode
+    }
+
     /// Run via the daemon (relay through Unix socket).
-    private static func runViaDaemon(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], tty: Bool) throws -> Int32 {
+    private static func runViaDaemon(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], tty: Bool) throws -> RunResult {
         let daemonFd = connectToDaemon(socketPath: paths.socketPath)
         guard daemonFd >= 0 else { throw FendError.connectionClosed }
         defer {
@@ -290,14 +341,18 @@ struct Run: AsyncParsableCommand {
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
-        fputs("fend: ready (\(String(format: "%.1f", elapsed))s)\n", stderr)
+        TerminalUI.success("sandbox ready", detail: "\(String(format: "%.1f", elapsed))s")
 
         SignalState.shared.fd = daemonFd
         if tty { sendWindowSize(to: daemonFd) }
         let stdinForwarder = startStdinForwarding(fd: daemonFd)
         defer { stdinForwarder.cancel() }
 
-        return try relayOutput(from: daemonFd)
+        var networkEvents: [NetworkEvent] = []
+        let exitCode = try relayOutput(from: daemonFd) { event in
+            networkEvents.append(event)
+        }
+        return RunResult(exitCode: exitCode, networkEvents: networkEvents)
     }
 
     /// Second half of the install-flow audit decision: take a raw report and
@@ -333,7 +388,8 @@ struct Run: AsyncParsableCommand {
             case .strict: reason = "below prompt threshold (worst=\(worst))"
             case .off: reason = "level=off"
             }
-            fputs("\nfend: proceeding despite findings (\(reason)).\n", stderr)
+            TerminalUI.blank()
+            TerminalUI.warning("proceeding despite findings", detail: reason)
             return AuditReport(
                 totalPackages: report.totalPackages,
                 findings: report.findings,
@@ -344,7 +400,8 @@ struct Run: AsyncParsableCommand {
         // Findings were already printed by the caller (unified report above).
         // Just ask the y/N question.
         _ = alreadyPrintedFindings
-        fputs("\nProceed with install scripts? [y/N] ", stderr)
+        TerminalUI.blank()
+        fputs("Proceed with install scripts? [y/N] ", stderr)
         let approved = AuditPrompt.readYN()
         return AuditReport(
             totalPackages: report.totalPackages,
@@ -354,18 +411,21 @@ struct Run: AsyncParsableCommand {
     }
 
     /// Run directly (boot VM in-process, no daemon).
-    private static func runDirect(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], start: CFAbsoluteTime, tty: Bool) async throws -> Int32 {
+    private static func runDirect(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], start: CFAbsoluteTime, tty: Bool) async throws -> RunResult {
         let config = FendConfig.load(from: projectDir)
         let vmManager = VMManager(paths: paths)
         let vmInstance = try await vmManager.vmForProject(projectDir, config: config)
         try await vmInstance.waitForReady()
         let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let networkCollector = NetworkEventCollector(vm: vmInstance)
+        networkCollector.start()
+        defer { networkCollector.stop() }
 
         let vsockConnection = try await vmInstance.connectToGuest(port: vsockPort)
         let guest = GuestConnection(connection: vsockConnection)
         try guest.waitForReady()
 
-        fputs("fend: ready (\(String(format: "%.1f", elapsed))s)\n", stderr)
+        TerminalUI.success("sandbox ready", detail: "\(String(format: "%.1f", elapsed))s")
 
         try guest.sendCommand(
             cmd: command[0],
@@ -384,7 +444,9 @@ struct Run: AsyncParsableCommand {
         }
 
         let exitCode = try relayOutput(from: guest.fd)
+        networkCollector.stop()
+        let networkEvents = networkCollector.snapshot
         vmInstance.forceStop()
-        return exitCode
+        return RunResult(exitCode: exitCode, networkEvents: networkEvents)
     }
 }
