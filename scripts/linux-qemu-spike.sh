@@ -8,11 +8,16 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'EOF'
-usage: scripts/linux-qemu-spike.sh [workspace]
+usage: scripts/linux-qemu-spike.sh [--check] [workspace]
+
+Options:
+  --check                Validate prerequisites and runtime artifacts without
+                         starting virtiofsd or QEMU.
 
 Environment:
   FEND_RUNTIME_DIR       Runtime dir containing vmlinuz, initrd, rootfs.img.
                          Default: ~/.fend/runtime/linux-x86_64
+  FEND_DEV_DIR           Device dir for preflight checks. Default: /dev
   FEND_QEMU_CID          Guest vsock CID. Default: 42
   FEND_QEMU_CPUS         vCPU count. Default: 2
   FEND_QEMU_MEMORY_MB    Memory in MiB. Default: 2048
@@ -21,45 +26,34 @@ Environment:
 After boot, run from another Linux terminal:
   cd fendd
   cargo run --features host-tools --bin fend-vsock-smoke -- --cid 42 -- /bin/echo ok
+
+Build runtime artifacts first with:
+  scripts/prepare-linux-x86_64-runtime.sh
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+CHECK_ONLY=0
+case "${1:-}" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --check|check)
+        CHECK_ONLY=1
+        shift
+        ;;
+esac
+
+if [[ "$#" -gt 1 ]]; then
+    echo "error: expected at most one workspace argument" >&2
     usage
-    exit 0
-fi
-
-if [[ "$(uname -s)" != "Linux" ]]; then
-    echo "error: this spike must run on a Linux host with KVM" >&2
-    exit 1
-fi
-
-if [[ "$(uname -m)" != "x86_64" ]]; then
-    echo "error: this spike currently targets x86_64 Linux hosts only" >&2
-    exit 1
-fi
-
-require_cmd() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo "error: missing required command: $1" >&2
-        exit 1
-    fi
-}
-
-require_cmd qemu-system-x86_64
-require_cmd virtiofsd
-
-if [[ ! -e /dev/kvm ]]; then
-    echo "error: /dev/kvm is missing; enable virtualization in firmware and load KVM" >&2
-    exit 1
-fi
-
-if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-    echo "error: current user cannot access /dev/kvm; add the user to the distro's kvm group" >&2
     exit 1
 fi
 
 FEND_HOME="${FEND_HOME:-"${HOME}/.fend"}"
+DEV_DIR="${FEND_DEV_DIR:-/dev}"
+KVM_DEV="${DEV_DIR}/kvm"
+VHOST_VSOCK_DEV="${DEV_DIR}/vhost-vsock"
 RUNTIME_DIR="${FEND_RUNTIME_DIR:-"${FEND_HOME}/runtime/linux-x86_64"}"
 KERNEL_PATH="${FEND_KERNEL:-"${RUNTIME_DIR}/vmlinuz"}"
 INITRD_PATH="${FEND_INITRD:-"${RUNTIME_DIR}/initrd"}"
@@ -71,6 +65,103 @@ GUEST_CID="${FEND_QEMU_CID:-42}"
 CPUS="${FEND_QEMU_CPUS:-2}"
 MEMORY_MB="${FEND_QEMU_MEMORY_MB:-2048}"
 NETWORK="${FEND_QEMU_NETWORK:-passt}"
+
+preflight() {
+    local failed=0
+
+    check_ok() {
+        printf '      %-16s %s\n' "$1" "$2"
+    }
+
+    check_fail() {
+        printf '      %-16s %s\n' "$1" "$2" >&2
+        failed=1
+    }
+
+    if [[ "$(uname -s)" == "Linux" ]]; then
+        check_ok "host" "Linux"
+    else
+        check_fail "host" "must be Linux"
+    fi
+
+    if [[ "$(uname -m)" == "x86_64" ]]; then
+        check_ok "arch" "x86_64"
+    else
+        check_fail "arch" "must be x86_64"
+    fi
+
+    for cmd in qemu-system-x86_64 virtiofsd base64; do
+        if command -v "${cmd}" >/dev/null 2>&1; then
+            check_ok "${cmd}" "ok"
+        else
+            check_fail "${cmd}" "missing"
+        fi
+    done
+
+    case "${NETWORK}" in
+        passt)
+            if command -v passt >/dev/null 2>&1; then
+                check_ok "passt" "ok"
+            else
+                check_fail "passt" "missing"
+            fi
+            ;;
+        user|off)
+            check_ok "network" "${NETWORK}"
+            ;;
+        *)
+            check_fail "network" "must be passt, user, or off"
+            ;;
+    esac
+
+    if [[ -e "${KVM_DEV}" ]]; then
+        if [[ -r "${KVM_DEV}" && -w "${KVM_DEV}" ]]; then
+            check_ok "kvm" "${KVM_DEV}"
+        else
+            check_fail "kvm" "permission denied: ${KVM_DEV} (add the user to the kvm group)"
+        fi
+    else
+        check_fail "kvm" "missing: ${KVM_DEV} (enable virtualization and load KVM)"
+    fi
+
+    if [[ -e "${VHOST_VSOCK_DEV}" ]]; then
+        check_ok "vhost-vsock" "${VHOST_VSOCK_DEV}"
+    else
+        check_fail "vhost-vsock" "missing: ${VHOST_VSOCK_DEV} (try: sudo modprobe vhost_vsock)"
+    fi
+
+    if [[ -d "${WORKSPACE}" ]]; then
+        check_ok "workspace" "${WORKSPACE}"
+    else
+        check_fail "workspace" "missing directory: ${WORKSPACE}"
+    fi
+
+    for artifact in "${KERNEL_PATH}" "${INITRD_PATH}" "${ROOTFS_PATH}"; do
+        if [[ -f "${artifact}" ]]; then
+            check_ok "artifact" "${artifact}"
+        else
+            check_fail "artifact" "missing: ${artifact}"
+        fi
+    done
+
+    [[ "${failed}" -eq 0 ]]
+}
+
+if [[ "${CHECK_ONLY}" == "1" ]]; then
+    echo "info  checking linux qemu spike"
+    if preflight; then
+        echo "info  linux qemu spike prerequisites ok"
+        exit 0
+    fi
+    echo "error linux qemu spike prerequisites failed" >&2
+    exit 1
+fi
+
+if ! preflight >/dev/null; then
+    echo "error linux qemu spike prerequisites failed; run scripts/linux-qemu-spike.sh --check" >&2
+    exit 1
+fi
+
 RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fend-qemu.XXXXXX")"
 LOG_DIR="${RUN_DIR}/logs"
 mkdir -p "${CACHE_DIR}" "${TOOLS_DIR}" "${LOG_DIR}"
@@ -83,25 +174,6 @@ cleanup() {
     rm -rf "${RUN_DIR}"
 }
 trap cleanup EXIT INT TERM
-
-for artifact in "${KERNEL_PATH}" "${INITRD_PATH}" "${ROOTFS_PATH}"; do
-    if [[ ! -f "${artifact}" ]]; then
-        cat >&2 <<EOF
-error: missing runtime artifact: ${artifact}
-
-Phase 1 expects x86_64 guest artifacts in:
-  ${RUNTIME_DIR}
-
-The current prepare-runtime.sh builds the macOS arm64 runtime. Build or place
-linux-x86_64 vmlinuz, initrd, and rootfs.img there before launching QEMU.
-EOF
-        exit 1
-    fi
-done
-
-if [[ "${NETWORK}" == "passt" ]]; then
-    require_cmd passt
-fi
 
 start_virtiofsd() {
     local name="$1"
@@ -183,7 +255,7 @@ qemu-system-x86_64 \
     -numa node,memdev=mem \
     -kernel "${KERNEL_PATH}" \
     -initrd "${INITRD_PATH}" \
-    -append "console=ttyS0 quiet fend.epoch=${EPOCH} fend.cwd=${GUEST_WORKSPACE_B64}" \
+    -append "console=ttyS0 root=/dev/vda rootwait rw init=/usr/local/bin/fendd quiet fend.epoch=${EPOCH} fend.cwd=${GUEST_WORKSPACE_B64}" \
     -drive "file=${ROOTFS_PATH},if=virtio,format=raw,cache=writeback" \
     -device "vhost-vsock-pci,id=fend-vsock,guest-cid=${GUEST_CID}" \
     -chardev "socket,id=char-workspace,path=${WORKSPACE_SOCKET}" \

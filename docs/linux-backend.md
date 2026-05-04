@@ -53,6 +53,11 @@ Exit criteria:
 
 Phase 1 spike artifacts now live in the repo:
 
+- `scripts/prepare-linux-x86_64-runtime.sh` builds the Linux spike runtime
+  artifacts in `~/.fend/runtime/linux-x86_64` by downloading Ubuntu 24.04 amd64
+  cloud kernel/initrd files, verifying them against Ubuntu's SHA256SUMS, and
+  building an Ubuntu 24.04 ext4 rootfs with an
+  `x86_64-unknown-linux-musl` `fendd`.
 - `scripts/linux-qemu-spike.sh` validates the Linux host prerequisites and
   launches the expected QEMU/KVM shape: direct kernel boot, virtio block
   rootfs, three VirtioFS shares (`workspace`, `cache`, `tools`), virtio-vsock,
@@ -60,19 +65,22 @@ Phase 1 spike artifacts now live in the repo:
 - `fendd/src/bin/fend-vsock-smoke.rs` is a gated Linux host smoke client for
   the existing fendd frame protocol. Build it with
   `cargo run --features host-tools --bin fend-vsock-smoke -- ...`.
+- `scripts/test-linux-spike-scripts.sh` runs host-independent shell checks with
+  mocked Linux/KVM tools. It validates argument parsing, preflight checks,
+  runtime artifact detection, and failure messages without booting QEMU.
 
-The current blocker is runtime image architecture, not the host command shape.
-Tool download resolution is platform-aware, but the existing
-`swift/scripts/prepare-runtime.sh` still builds the macOS arm64 runtime: Ubuntu
-arm64 kernel, Alpine aarch64 initrd pieces, linux-arm64 Claude tooling, and an
-`aarch64-unknown-linux-musl` `fendd`. The Linux x86_64 backend needs a separate
-runtime directory, expected by the spike script at
-`~/.fend/runtime/linux-x86_64/`, containing:
+Runtime image architecture is now split by script. Tool download resolution is
+platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
+builds the macOS arm64 runtime: Ubuntu arm64 kernel, Alpine aarch64 initrd
+pieces, linux-arm64 Claude tooling, and an `aarch64-unknown-linux-musl`
+`fendd`. The Linux x86_64 spike builder writes a separate runtime directory,
+expected by the QEMU launcher at `~/.fend/runtime/linux-x86_64/`, containing:
 
 - `vmlinuz`: x86_64 Linux kernel with virtio block, virtio-net, virtio-vsock,
   fuse, and virtiofs support available either built in or via the initrd.
-- `initrd`: x86_64 initramfs that mounts `/dev/vda` and switch-roots into
-  `/usr/local/bin/fendd`.
+- `initrd`: Ubuntu's matching amd64 cloud initrd. For the first spike this is
+  deliberately less minimal than the macOS initrd, because it carries matching
+  module dependencies and reduces boot-proving risk.
 - `rootfs.img`: x86_64 ext4 image containing the static `fendd` binary and the
   same minimal userspace packages used by the macOS guest.
 
@@ -82,10 +90,32 @@ Manual spike flow on an x86_64 Linux workstation:
 rustup target add x86_64-unknown-linux-musl
 cd fendd
 cargo build --release --target x86_64-unknown-linux-musl --bin fendd
+cd ..
+scripts/prepare-linux-x86_64-runtime.sh
 ```
 
-After placing x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
-`~/.fend/runtime/linux-x86_64` or setting `FEND_RUNTIME_DIR`, launch the VM:
+The builder currently uses Docker to assemble the ext4 rootfs. That is a
+developer-spike dependency, not the intended end-user Linux prerequisite.
+
+Host-independent checks that can run on macOS:
+
+```bash
+bash -n scripts/prepare-linux-x86_64-runtime.sh
+bash -n scripts/linux-qemu-spike.sh
+scripts/test-linux-spike-scripts.sh
+cargo test --manifest-path fendd/Cargo.toml
+swift test --package-path swift
+```
+
+On a Linux host, run no-boot preflight before launching QEMU:
+
+```bash
+scripts/prepare-linux-x86_64-runtime.sh --check
+scripts/linux-qemu-spike.sh --check /path/to/project
+```
+
+After the builder places x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
+`~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch the VM:
 
 ```bash
 FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
@@ -206,3 +236,5 @@ Exit criteria:
   <https://www.qemu.org/docs/master/system/devices/net.html>
 - QEMU/virtiofsd command shape:
   <https://virtio-fs.gitlab.io/qemu/tools/virtiofsd.html>
+- Ubuntu 24.04 cloud kernel/initrd index:
+  <https://cloud-images.ubuntu.com/releases/noble/release/unpacked/>

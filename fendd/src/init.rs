@@ -243,9 +243,9 @@ fn setup_environment() {
 
     unsafe { libc::chmod(CString::new("/tmp").unwrap().as_ptr(), 0o1777); }
 
-    if std::path::Path::new("/opt/tools/claude/claude").exists() {
+    if let Some(claude_path) = find_claude_bin() {
         std::fs::create_dir_all("/home/user/.local/bin").ok();
-        std::os::unix::fs::symlink("/opt/tools/claude/claude", "/home/user/.local/bin/claude").ok();
+        std::os::unix::fs::symlink(claude_path, "/home/user/.local/bin/claude").ok();
     }
 
     chown_recursive("/home/user", 1000, 1000);
@@ -283,7 +283,7 @@ fn build_tools_path() -> String {
                 if entry.path().join("bun").exists() {
                     paths.push(entry.path().to_string_lossy().to_string());
                 }
-            } else if name_str == "claude" {
+            } else if name_str == "claude" || name_str.starts_with("claude-") {
                 if entry.path().join("claude").exists() {
                     paths.push(entry.path().to_string_lossy().to_string());
                 }
@@ -300,6 +300,25 @@ fn build_tools_path() -> String {
         "/bin".to_string(),
     ]);
     paths.join(":")
+}
+
+fn find_claude_bin() -> Option<String> {
+    if let Ok(entries) = std::fs::read_dir("/opt/tools") {
+        let mut entries: Vec<_> = entries.flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str == "claude" || name_str.starts_with("claude-") {
+                let candidate = entry.path().join("claude");
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn find_tool_bin(name: &str) -> Option<String> {
