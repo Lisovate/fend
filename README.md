@@ -260,6 +260,7 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 - **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
 - **Next:** macOS Intel.
 - **Then:** Linux via KVM/QEMU first, with a smaller custom backend evaluated later. See [`docs/linux-backend.md`](./docs/linux-backend.md).
+- **Linux spike:** `scripts/linux-qemu-spike.sh` captures the manual QEMU/KVM launch shape, and `fend-vsock-smoke` can verify the host-to-`fendd` vsock command path once x86_64 runtime artifacts exist.
 - **Future:** Windows (WSL2), AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
 
 Issues, bug reports, and PRs welcome.

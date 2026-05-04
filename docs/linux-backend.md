@@ -51,6 +51,66 @@ Exit criteria:
 - `fendd` can run a simple command in `/workspace`.
 - `--network off` still isolates the child process network namespace.
 
+Phase 1 spike artifacts now live in the repo:
+
+- `scripts/linux-qemu-spike.sh` validates the Linux host prerequisites and
+  launches the expected QEMU/KVM shape: direct kernel boot, virtio block
+  rootfs, three VirtioFS shares (`workspace`, `cache`, `tools`), virtio-vsock,
+  and rootless networking through `passt` by default.
+- `fendd/src/bin/fend-vsock-smoke.rs` is a gated Linux host smoke client for
+  the existing fendd frame protocol. Build it with
+  `cargo run --features host-tools --bin fend-vsock-smoke -- ...`.
+
+The current blocker is runtime architecture, not the host command shape. The
+existing `swift/scripts/prepare-runtime.sh` builds the macOS arm64 runtime:
+Ubuntu arm64 kernel, Alpine aarch64 initrd pieces, linux-arm64 Node/Claude
+tools, and an `aarch64-unknown-linux-musl` `fendd`. The Linux x86_64 backend
+needs a separate runtime directory, expected by the spike script at
+`~/.fend/runtime/linux-x86_64/`, containing:
+
+- `vmlinuz`: x86_64 Linux kernel with virtio block, virtio-net, virtio-vsock,
+  fuse, and virtiofs support available either built in or via the initrd.
+- `initrd`: x86_64 initramfs that mounts `/dev/vda` and switch-roots into
+  `/usr/local/bin/fendd`.
+- `rootfs.img`: x86_64 ext4 image containing the static `fendd` binary and the
+  same minimal userspace packages used by the macOS guest.
+
+Manual spike flow on an x86_64 Linux workstation:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cd fendd
+cargo build --release --target x86_64-unknown-linux-musl --bin fendd
+```
+
+After placing x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
+`~/.fend/runtime/linux-x86_64` or setting `FEND_RUNTIME_DIR`, launch the VM:
+
+```bash
+FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
+  scripts/linux-qemu-spike.sh /path/to/project
+```
+
+Then, from another terminal, verify the vsock command path:
+
+```bash
+cd fendd
+cargo run --features host-tools --bin fend-vsock-smoke -- \
+  --cid 42 -- /bin/echo fend-linux-ok
+```
+
+Verify command-level network isolation:
+
+```bash
+cd fendd
+cargo run --features host-tools --bin fend-vsock-smoke -- \
+  --cid 42 --env FEND_NETWORK_MODE=off -- /usr/bin/curl -I https://example.com
+```
+
+The expected result for the second command is a DNS/connectivity failure from
+inside the sandboxed child process, while the VM itself may still have network
+for package-manager and daemon needs.
+
 ## Phase 2: Backend Boundary
 
 Goal: separate host orchestration from macOS Virtualization.framework specifics.
@@ -138,3 +198,10 @@ Exit criteria:
   bundling pinned builds may be better later.
 - Whether a custom `rust-vmm` backend is worth the engineering cost after the
   QEMU/KVM MVP proves the product path.
+
+## References
+
+- QEMU network backends, including `passt`:
+  <https://www.qemu.org/docs/master/system/devices/net.html>
+- QEMU/virtiofsd command shape:
+  <https://virtio-fs.gitlab.io/qemu/tools/virtiofsd.html>
