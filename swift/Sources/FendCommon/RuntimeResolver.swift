@@ -3,16 +3,25 @@ import Foundation
 /// Resolve the Node.js version to use and ensure it's downloaded.
 /// Priority: .fend.toml runtime.node > .node-version/.nvmrc > package.json engines.node > host's node version
 public func resolveNodeRuntime(config: FendConfig, projectDir: URL, paths: FendPaths) throws -> URL {
+    try resolveNodeRuntime(config: config, projectDir: projectDir, paths: paths, platform: .current)
+}
+
+func resolveNodeRuntime(
+    config: FendConfig,
+    projectDir: URL,
+    paths: FendPaths,
+    platform: GuestRuntimePlatform
+) throws -> URL {
     let version = try resolveNodeVersion(config: config, projectDir: projectDir)
-    let nodeDir = paths.nodeDir(version: version)
+    let nodeDir = paths.nodeDir(version: version, platform: platform)
     let nodeBin = nodeDir.appendingPathComponent("bin/node")
 
     if FileManager.default.fileExists(atPath: nodeBin.path) {
         return nodeDir
     }
 
-    fputs("fend: downloading Node.js v\(version) for linux-arm64...\n", stderr)
-    try downloadNode(version: version, dest: nodeDir)
+    fputs("fend: downloading Node.js v\(version) for \(platform.nodeArchivePlatform)...\n", stderr)
+    try downloadNode(version: version, dest: nodeDir, platform: platform)
     fputs("fend: Node.js v\(version) ready\n", stderr)
     return nodeDir
 }
@@ -348,6 +357,15 @@ private func parsePartialSemVer(_ raw: String) -> PartialSemVer? {
 /// Resolve the Bun runtime if the project uses bun (bun.lockb or bunfig.toml present).
 /// Returns the bun directory URL if bun is needed, nil otherwise.
 public func resolveBunRuntime(config: FendConfig, projectDir: URL, paths: FendPaths) throws -> URL? {
+    try resolveBunRuntime(config: config, projectDir: projectDir, paths: paths, platform: .current)
+}
+
+func resolveBunRuntime(
+    config: FendConfig,
+    projectDir: URL,
+    paths: FendPaths,
+    platform: GuestRuntimePlatform
+) throws -> URL? {
     let hasBunLock = FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("bun.lockb").path)
         || FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("bun.lock").path)
     let hasBunfig = FileManager.default.fileExists(atPath: projectDir.appendingPathComponent("bunfig.toml").path)
@@ -356,15 +374,15 @@ public func resolveBunRuntime(config: FendConfig, projectDir: URL, paths: FendPa
     guard hasBunLock || hasBunfig || configuredBun else { return nil }
 
     let version = try resolveBunVersion(config: config)
-    let bunDir = paths.bunDir(version: version)
+    let bunDir = paths.bunDir(version: version, platform: platform)
     let bunBin = bunDir.appendingPathComponent("bun")
 
     if FileManager.default.fileExists(atPath: bunBin.path) {
         return bunDir
     }
 
-    fputs("fend: downloading Bun v\(version) for linux-aarch64...\n", stderr)
-    try downloadBun(version: version, dest: bunDir)
+    fputs("fend: downloading Bun v\(version) for \(platform.bunArchivePlatform)...\n", stderr)
+    try downloadBun(version: version, dest: bunDir, platform: platform)
     fputs("fend: Bun v\(version) ready\n", stderr)
     return bunDir
 }
@@ -418,9 +436,9 @@ private func resolveBunVersion(config: FendConfig) throws -> String {
     return defaultVersion
 }
 
-private func downloadBun(version: String, dest: URL) throws {
+private func downloadBun(version: String, dest: URL, platform: GuestRuntimePlatform) throws {
     let fm = FileManager.default
-    let zipName = "bun-linux-aarch64"
+    let zipName = platform.bunArchiveName()
     let url = URL(string: "https://github.com/oven-sh/bun/releases/download/bun-v\(version)/\(zipName).zip")!
 
     let tempDir = fm.temporaryDirectory.appendingPathComponent("fend-bun-\(UUID().uuidString)")
@@ -458,9 +476,9 @@ private func downloadBun(version: String, dest: URL) throws {
     try fm.moveItem(at: extracted, to: dest)
 }
 
-private func downloadNode(version: String, dest: URL) throws {
+private func downloadNode(version: String, dest: URL, platform: GuestRuntimePlatform) throws {
     let fm = FileManager.default
-    let tarName = "node-v\(version)-linux-arm64"
+    let tarName = platform.nodeArchiveName(version: version)
     let url = URL(string: "https://nodejs.org/dist/v\(version)/\(tarName).tar.xz")!
 
     let tempDir = fm.temporaryDirectory.appendingPathComponent("fend-node-\(UUID().uuidString)")

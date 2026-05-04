@@ -3,6 +3,19 @@ import XCTest
 
 final class RuntimeResolverTests: XCTestCase {
 
+    func testGuestRuntimePlatformArchiveNames() {
+        XCTAssertEqual(
+            GuestRuntimePlatform.linuxARM64.nodeArchiveName(version: "22.11.0"),
+            "node-v22.11.0-linux-arm64"
+        )
+        XCTAssertEqual(
+            GuestRuntimePlatform.linuxX64.nodeArchiveName(version: "22.11.0"),
+            "node-v22.11.0-linux-x64"
+        )
+        XCTAssertEqual(GuestRuntimePlatform.linuxARM64.bunArchiveName(), "bun-linux-aarch64")
+        XCTAssertEqual(GuestRuntimePlatform.linuxX64.bunArchiveName(), "bun-linux-x64")
+    }
+
     func testNormalizeNodeVersionFullSemver() {
         XCTAssertEqual(normalizeNodeVersion("22.11.0"), "22.11.0")
     }

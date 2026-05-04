@@ -38,14 +38,20 @@ public struct FendPaths {
         stateDir.appendingPathComponent(hash).appendingPathComponent("project-path")
     }
 
-    /// Directory containing a Node.js linux-arm64 installation for a given version.
-    public func nodeDir(version: String) -> URL {
-        toolsDir.appendingPathComponent("node-\(version)")
+    /// Directory containing a Node.js guest Linux installation for a given version.
+    public func nodeDir(version: String, platform: GuestRuntimePlatform = .current) -> URL {
+        let name = platform.usesLegacyToolDirectoryName
+            ? "node-\(version)"
+            : "node-\(version)-\(platform.rawValue)"
+        return toolsDir.appendingPathComponent(name)
     }
 
-    /// Directory containing a Bun linux-arm64 installation.
-    public func bunDir(version: String) -> URL {
-        toolsDir.appendingPathComponent("bun-\(version)")
+    /// Directory containing a Bun guest Linux installation.
+    public func bunDir(version: String, platform: GuestRuntimePlatform = .current) -> URL {
+        let name = platform.usesLegacyToolDirectoryName
+            ? "bun-\(version)"
+            : "bun-\(version)-\(platform.rawValue)"
+        return toolsDir.appendingPathComponent(name)
     }
 
     /// Path to the base rootfs.img in the runtime directory.

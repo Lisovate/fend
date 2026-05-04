@@ -59,10 +59,22 @@ final class PathsTests: XCTestCase {
         XCTAssertEqual(nodeDir, paths.toolsDir.appendingPathComponent("node-22.11.0"))
     }
 
+    func testNodeDirForLinuxX64IncludesPlatform() {
+        let paths = FendPaths()
+        let nodeDir = paths.nodeDir(version: "22.11.0", platform: .linuxX64)
+        XCTAssertEqual(nodeDir, paths.toolsDir.appendingPathComponent("node-22.11.0-linux-x64"))
+    }
+
     func testBunDir() {
         let paths = FendPaths()
         let bunDir = paths.bunDir(version: "1.1.0")
         XCTAssertEqual(bunDir, paths.toolsDir.appendingPathComponent("bun-1.1.0"))
+    }
+
+    func testBunDirForLinuxX64IncludesPlatform() {
+        let paths = FendPaths()
+        let bunDir = paths.bunDir(version: "1.1.0", platform: .linuxX64)
+        XCTAssertEqual(bunDir, paths.toolsDir.appendingPathComponent("bun-1.1.0-linux-x64"))
     }
 
     func testRootfsImagePath() {

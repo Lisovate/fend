@@ -61,11 +61,12 @@ Phase 1 spike artifacts now live in the repo:
   the existing fendd frame protocol. Build it with
   `cargo run --features host-tools --bin fend-vsock-smoke -- ...`.
 
-The current blocker is runtime architecture, not the host command shape. The
-existing `swift/scripts/prepare-runtime.sh` builds the macOS arm64 runtime:
-Ubuntu arm64 kernel, Alpine aarch64 initrd pieces, linux-arm64 Node/Claude
-tools, and an `aarch64-unknown-linux-musl` `fendd`. The Linux x86_64 backend
-needs a separate runtime directory, expected by the spike script at
+The current blocker is runtime image architecture, not the host command shape.
+Tool download resolution is platform-aware, but the existing
+`swift/scripts/prepare-runtime.sh` still builds the macOS arm64 runtime: Ubuntu
+arm64 kernel, Alpine aarch64 initrd pieces, linux-arm64 Claude tooling, and an
+`aarch64-unknown-linux-musl` `fendd`. The Linux x86_64 backend needs a separate
+runtime directory, expected by the spike script at
 `~/.fend/runtime/linux-x86_64/`, containing:
 
 - `vmlinuz`: x86_64 Linux kernel with virtio block, virtio-net, virtio-vsock,
