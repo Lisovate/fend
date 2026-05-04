@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::qemu::RuntimeArtifacts;
+use crate::qemu::{NetworkMode, RuntimeArtifacts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceStatus {
@@ -46,11 +46,23 @@ pub struct HostProbe {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorReport {
     pub title: &'static str,
+    pub ok_message: &'static str,
     pub fields: Vec<(String, String)>,
     pub issues: Vec<String>,
 }
 
 pub fn current_probe(runtime_dir: impl AsRef<Path>) -> HostProbe {
+    current_probe_with_builder_checks(runtime_dir, true)
+}
+
+pub fn current_launch_probe(runtime_dir: impl AsRef<Path>) -> HostProbe {
+    current_probe_with_builder_checks(runtime_dir, false)
+}
+
+fn current_probe_with_builder_checks(
+    runtime_dir: impl AsRef<Path>,
+    include_builder_checks: bool,
+) -> HostProbe {
     let runtime_dir = runtime_dir.as_ref().to_path_buf();
     let artifacts = RuntimeArtifacts::from_runtime_dir(&runtime_dir);
 
@@ -64,8 +76,9 @@ pub fn current_probe(runtime_dir: impl AsRef<Path>) -> HostProbe {
         qemu_available: command_exists("qemu-system-x86_64"),
         virtiofsd_available: command_exists("virtiofsd"),
         passt_available: command_exists("passt"),
-        docker_available: process_succeeds("docker", &["info"]),
-        rust_musl_target_installed: rust_target_installed("x86_64-unknown-linux-musl"),
+        docker_available: include_builder_checks && process_succeeds("docker", &["info"]),
+        rust_musl_target_installed: include_builder_checks
+            && rust_target_installed("x86_64-unknown-linux-musl"),
         kvm: device_status("/dev/kvm"),
         vhost_vsock: device_status("/dev/vhost-vsock"),
         cpu_virtualization_available: cpu_virtualization_available(),
@@ -73,8 +86,41 @@ pub fn current_probe(runtime_dir: impl AsRef<Path>) -> HostProbe {
 }
 
 pub fn evaluate(probe: &HostProbe) -> DoctorReport {
+    evaluate_with_options(
+        probe,
+        ReportOptions {
+            title: "fend linux doctor",
+            ok_message: "ok  linux backend prerequisites look ready",
+            network: None,
+            include_builder_requirements: true,
+        },
+    )
+}
+
+pub fn evaluate_launch(probe: &HostProbe, network: NetworkMode) -> DoctorReport {
+    evaluate_with_options(
+        probe,
+        ReportOptions {
+            title: "fend linux launch preflight",
+            ok_message: "ok  linux launch prerequisites look ready",
+            network: Some(network),
+            include_builder_requirements: false,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReportOptions {
+    title: &'static str,
+    ok_message: &'static str,
+    network: Option<NetworkMode>,
+    include_builder_requirements: bool,
+}
+
+fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorReport {
     let artifacts = RuntimeArtifacts::from_runtime_dir(&probe.runtime_dir);
     let artifacts_missing = !probe.kernel_exists || !probe.initrd_exists || !probe.rootfs_exists;
+    let require_passt = options.network.unwrap_or(NetworkMode::Passt) == NetworkMode::Passt;
     let mut issues = Vec::new();
 
     if probe.os != "linux" {
@@ -95,7 +141,7 @@ pub fn evaluate(probe: &HostProbe) -> DoctorReport {
     if !probe.virtiofsd_available {
         issues.push("Install virtiofsd.".to_string());
     }
-    if !probe.passt_available {
+    if require_passt && !probe.passt_available {
         issues.push("Install passt, or launch with FEND_QEMU_NETWORK=user/off.".to_string());
     }
 
@@ -119,67 +165,87 @@ pub fn evaluate(probe: &HostProbe) -> DoctorReport {
             "Run scripts/prepare-linux-x86_64-runtime.sh to build Linux runtime artifacts."
                 .to_string(),
         );
-        if !probe.docker_available {
+        if options.include_builder_requirements && !probe.docker_available {
             issues.push("Docker is required by the current Linux runtime builder.".to_string());
         }
-        if !probe.rust_musl_target_installed {
+        if options.include_builder_requirements && !probe.rust_musl_target_installed {
             issues.push(
                 "Install Rust target x86_64-unknown-linux-musl before building fendd.".to_string(),
             );
         }
     }
 
+    let mut fields = vec![
+        ("os".to_string(), probe.os.clone()),
+        ("architecture".to_string(), probe.arch.clone()),
+        (
+            "runtime".to_string(),
+            probe.runtime_dir.display().to_string(),
+        ),
+        (
+            "kernel".to_string(),
+            artifact_value(&artifacts.kernel, probe.kernel_exists),
+        ),
+        (
+            "initrd".to_string(),
+            artifact_value(&artifacts.initrd, probe.initrd_exists),
+        ),
+        (
+            "rootfs".to_string(),
+            artifact_value(&artifacts.rootfs, probe.rootfs_exists),
+        ),
+        ("qemu".to_string(), available_value(probe.qemu_available)),
+        (
+            "virtiofsd".to_string(),
+            available_value(probe.virtiofsd_available),
+        ),
+    ];
+    if let Some(network) = options.network {
+        fields.push(("network".to_string(), network_value(network).to_string()));
+    }
+    if options.network.is_none() || require_passt {
+        fields.push(("passt".to_string(), available_value(probe.passt_available)));
+    }
+    if options.include_builder_requirements {
+        fields.push((
+            "docker".to_string(),
+            available_value(probe.docker_available),
+        ));
+        fields.push((
+            "rust target".to_string(),
+            if probe.rust_musl_target_installed {
+                "installed".to_string()
+            } else {
+                "missing".to_string()
+            },
+        ));
+    }
+    fields.extend([
+        ("/dev/kvm".to_string(), probe.kvm.label()),
+        ("/dev/vhost-vsock".to_string(), probe.vhost_vsock.label()),
+        (
+            "cpu virt".to_string(),
+            match probe.cpu_virtualization_available {
+                Some(true) => "available".to_string(),
+                Some(false) => "missing".to_string(),
+                None => "not checked".to_string(),
+            },
+        ),
+    ]);
+
     DoctorReport {
-        title: "fend linux doctor",
-        fields: vec![
-            ("os".to_string(), probe.os.clone()),
-            ("architecture".to_string(), probe.arch.clone()),
-            (
-                "runtime".to_string(),
-                probe.runtime_dir.display().to_string(),
-            ),
-            (
-                "kernel".to_string(),
-                artifact_value(&artifacts.kernel, probe.kernel_exists),
-            ),
-            (
-                "initrd".to_string(),
-                artifact_value(&artifacts.initrd, probe.initrd_exists),
-            ),
-            (
-                "rootfs".to_string(),
-                artifact_value(&artifacts.rootfs, probe.rootfs_exists),
-            ),
-            ("qemu".to_string(), available_value(probe.qemu_available)),
-            (
-                "virtiofsd".to_string(),
-                available_value(probe.virtiofsd_available),
-            ),
-            ("passt".to_string(), available_value(probe.passt_available)),
-            (
-                "docker".to_string(),
-                available_value(probe.docker_available),
-            ),
-            (
-                "rust target".to_string(),
-                if probe.rust_musl_target_installed {
-                    "installed".to_string()
-                } else {
-                    "missing".to_string()
-                },
-            ),
-            ("/dev/kvm".to_string(), probe.kvm.label()),
-            ("/dev/vhost-vsock".to_string(), probe.vhost_vsock.label()),
-            (
-                "cpu virt".to_string(),
-                match probe.cpu_virtualization_available {
-                    Some(true) => "available".to_string(),
-                    Some(false) => "missing".to_string(),
-                    None => "not checked".to_string(),
-                },
-            ),
-        ],
+        title: options.title,
+        ok_message: options.ok_message,
+        fields,
         issues,
+    }
+}
+
+fn network_value(network: NetworkMode) -> &'static str {
+    match network {
+        NetworkMode::Passt => "passt",
+        NetworkMode::User => "user",
+        NetworkMode::Off => "off",
     }
 }
 
@@ -344,6 +410,54 @@ mod tests {
         let report = evaluate(&probe);
 
         assert_contains(&report.issues, "Linux host backend must run on Linux.");
+    }
+
+    #[test]
+    fn launch_preflight_only_requires_passt_for_passt_networking() {
+        let mut probe = linux_probe();
+        probe.passt_available = false;
+
+        let off_report = evaluate_launch(&probe, NetworkMode::Off);
+        assert!(off_report.issues.is_empty());
+        assert_eq!(off_report.title, "fend linux launch preflight");
+        assert_eq!(
+            off_report.ok_message,
+            "ok  linux launch prerequisites look ready"
+        );
+        assert_eq!(field(&off_report, "network"), Some("off"));
+        assert_eq!(field(&off_report, "passt"), None);
+
+        let passt_report = evaluate_launch(&probe, NetworkMode::Passt);
+        assert_contains(
+            &passt_report.issues,
+            "Install passt, or launch with FEND_QEMU_NETWORK=user/off.",
+        );
+        assert_eq!(field(&passt_report, "network"), Some("passt"));
+        assert_eq!(field(&passt_report, "passt"), Some("missing"));
+    }
+
+    #[test]
+    fn launch_preflight_does_not_require_builder_tools() {
+        let mut probe = linux_probe();
+        probe.kernel_exists = false;
+        probe.initrd_exists = false;
+        probe.rootfs_exists = false;
+        probe.docker_available = false;
+        probe.rust_musl_target_installed = false;
+
+        let report = evaluate_launch(&probe, NetworkMode::User);
+
+        assert_contains(
+            &report.issues,
+            "Run scripts/prepare-linux-x86_64-runtime.sh to build Linux runtime artifacts.",
+        );
+        assert!(!report.issues.iter().any(|issue| issue.contains("Docker")));
+        assert!(!report
+            .issues
+            .iter()
+            .any(|issue| issue.contains("Rust target")));
+        assert_eq!(field(&report, "docker"), None);
+        assert_eq!(field(&report, "rust target"), None);
     }
 
     #[test]

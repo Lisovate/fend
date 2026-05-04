@@ -73,7 +73,10 @@ Phase 1 spike artifacts now live in the repo:
   report without launching QEMU. It also includes a small `fend-linux` spike
   binary so the Rust path can render Linux doctor output, inspect the launch
   plan, and supervise the first QEMU launch path before it grows into the full
-  Linux host runner.
+  Linux host runner. The launch path now runs its own preflight before starting
+  sidecars or QEMU; it checks only launch-time requirements, so Docker and the
+  Rust musl target remain builder concerns, and `passt` is required only for
+  `--network passt`.
 
 Runtime image architecture is now split by script. Tool download resolution is
 platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
@@ -123,6 +126,10 @@ cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- doctor
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /path/to/project
 scripts/prepare-linux-x86_64-runtime.sh --check
 ```
+
+`fend-linux launch` also runs a launch-specific preflight automatically before
+it creates `virtiofsd` sockets or starts QEMU. Use `--network user` or
+`--network off` when validating hosts without `passt`.
 
 After the builder places x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
 `~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch through

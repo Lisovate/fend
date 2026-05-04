@@ -177,12 +177,16 @@ pub fn resolve_doctor_runtime_dir(options: &DoctorOptions, defaults: &PlanDefaul
         .unwrap_or_else(|| default_runtime_dir(defaults))
 }
 
-pub fn build_launch_config(options: &PlanOptions, defaults: &PlanDefaults) -> LaunchConfig {
-    let runtime_dir = options
+pub fn resolve_plan_runtime_dir(options: &PlanOptions, defaults: &PlanDefaults) -> PathBuf {
+    options
         .runtime_dir
         .clone()
         .or_else(|| defaults.runtime_dir.clone())
-        .unwrap_or_else(|| default_runtime_dir(defaults));
+        .unwrap_or_else(|| default_runtime_dir(defaults))
+}
+
+pub fn build_launch_config(options: &PlanOptions, defaults: &PlanDefaults) -> LaunchConfig {
+    let runtime_dir = resolve_plan_runtime_dir(options, defaults);
     let workspace = options
         .workspace
         .clone()
@@ -252,7 +256,7 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
 
     if report.issues.is_empty() {
         writeln!(&mut output).unwrap();
-        writeln!(&mut output, "ok  linux backend prerequisites look ready").unwrap();
+        writeln!(&mut output, "{}", report.ok_message).unwrap();
     } else {
         writeln!(&mut output).unwrap();
         writeln!(&mut output, "issues").unwrap();
@@ -557,6 +561,33 @@ mod tests {
         assert_eq!(config.memory_mib, 2048);
         assert_eq!(config.network, NetworkMode::Off);
         assert_eq!(config.epoch, 1234);
+    }
+
+    #[test]
+    fn resolves_plan_runtime_dir_with_option_env_then_default_precedence() {
+        let defaults = PlanDefaults {
+            runtime_dir: Some(PathBuf::from("/env/runtime")),
+            ..sample_defaults()
+        };
+
+        assert_eq!(
+            resolve_plan_runtime_dir(
+                &PlanOptions {
+                    runtime_dir: Some(PathBuf::from("/option/runtime")),
+                    ..PlanOptions::default()
+                },
+                &defaults
+            ),
+            PathBuf::from("/option/runtime")
+        );
+        assert_eq!(
+            resolve_plan_runtime_dir(&PlanOptions::default(), &defaults),
+            PathBuf::from("/env/runtime")
+        );
+        assert_eq!(
+            resolve_plan_runtime_dir(&PlanOptions::default(), &sample_defaults()),
+            PathBuf::from("/home/user/.fend/runtime/linux-x86_64")
+        );
     }
 
     #[test]
