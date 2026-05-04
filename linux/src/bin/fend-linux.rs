@@ -1,0 +1,56 @@
+use std::process::ExitCode;
+
+use fend_linux::cli::{
+    build_launch_config, doctor_usage, parse_args, plan_defaults_from_env, plan_usage,
+    render_doctor_report, render_launch_plan, resolve_doctor_runtime_dir, usage, CliCommand,
+    HelpTopic,
+};
+use fend_linux::doctor;
+use fend_linux::qemu;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run() -> Result<ExitCode, String> {
+    let command =
+        parse_args(std::env::args().skip(1)).map_err(|error| format!("{error}\n\n{}", usage()))?;
+
+    match command {
+        CliCommand::Help(topic) => {
+            print!(
+                "{}",
+                match topic {
+                    HelpTopic::General => usage(),
+                    HelpTopic::Doctor => doctor_usage(),
+                    HelpTopic::Plan => plan_usage(),
+                }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        CliCommand::Doctor(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let runtime_dir = resolve_doctor_runtime_dir(&options, &defaults);
+            let report = doctor::evaluate(&doctor::current_probe(runtime_dir));
+            print!("{}", render_doctor_report(&report));
+            if report.issues.is_empty() {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Ok(ExitCode::FAILURE)
+            }
+        }
+        CliCommand::Plan(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let config = build_launch_config(&options, &defaults);
+            let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
+            print!("{}", render_launch_plan(&plan));
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}

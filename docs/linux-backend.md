@@ -70,7 +70,9 @@ Phase 1 spike artifacts now live in the repo:
   runtime artifact detection, and failure messages without booting QEMU.
 - `linux/` is the separate Rust host-side implementation area for Linux. The
   first modules build the pure QEMU/KVM command model and Linux doctor/preflight
-  report without launching QEMU.
+  report without launching QEMU. It also includes a small `fend-linux` spike
+  binary so the Rust path can render Linux doctor output and inspect the launch
+  plan before it grows into the full Linux host runner.
 
 Runtime image architecture is now split by script. Tool download resolution is
 platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
@@ -106,13 +108,17 @@ Host-independent checks that can run on macOS:
 bash -n scripts/prepare-linux-x86_64-runtime.sh
 bash -n scripts/linux-qemu-spike.sh
 scripts/test-linux-spike-scripts.sh
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /tmp/project
 cargo test --manifest-path fendd/Cargo.toml
+cargo test --manifest-path linux/Cargo.toml
 swift test --package-path swift
 ```
 
 On a Linux host, run no-boot preflight before launching QEMU:
 
 ```bash
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- doctor
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /path/to/project
 scripts/prepare-linux-x86_64-runtime.sh --check
 scripts/linux-qemu-spike.sh --check /path/to/project
 ```
