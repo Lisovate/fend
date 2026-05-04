@@ -199,6 +199,11 @@ Exit criteria:
 - Missing prerequisites produce actionable `doctor` output.
 - Linux binary can be distributed through npm optional dependencies.
 
+Progress: the CLI now has a unit-tested Linux doctor evaluator for x86_64,
+QEMU, `virtiofsd`, `passt`, Docker, Rust musl target, `/dev/kvm`,
+`/dev/vhost-vsock`, CPU virtualization flags, and Linux runtime artifacts. The
+checks will become directly runnable once the CLI package is built on Linux.
+
 ## Phase 5: Mirror Watch Mode
 
 Goal: replace Linux polling for long-running dev servers where polling overhead

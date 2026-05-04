@@ -128,60 +128,17 @@ struct Doctor: ParsableCommand {
     func run() {
         let paths = FendPaths()
         let config = FendConfig.load(from: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-        let fm = FileManager.default
-        let kernelExists = fm.fileExists(atPath: paths.runtimeDir.appendingPathComponent("vmlinuz").path)
-        let initrdExists = fm.fileExists(atPath: paths.runtimeDir.appendingPathComponent("initrd").path)
-        let rootfsExists = fm.fileExists(atPath: paths.rootfsImagePath.path)
+        let report = DoctorChecks.evaluate(DoctorChecks.currentProbe(paths: paths, config: config))
 
-        let dockerAvailable: Bool = {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            task.arguments = ["docker", "info"]
-            task.standardOutput = FileHandle.nullDevice
-            task.standardError = FileHandle.nullDevice
-            do {
-                try task.run()
-                task.waitUntilExit()
-                return task.terminationStatus == 0
-            } catch {
-                return false
-            }
-        }()
+        TerminalUI.section(report.title)
+        TerminalUI.fields(report.fields)
 
-        TerminalUI.section("fend doctor")
-        TerminalUI.fields([
-            ("macOS", ProcessInfo.processInfo.operatingSystemVersionString),
-        ])
-
-        #if arch(arm64)
-        let architecture = "Apple Silicon (arm64)"
-        #else
-        let architecture = "Intel (x86_64)"
-        #endif
-
-        TerminalUI.fields([
-            ("architecture", architecture),
-            ("kernel", kernelExists ? paths.runtimeDir.appendingPathComponent("vmlinuz").path : "missing"),
-            ("initrd", initrdExists ? paths.runtimeDir.appendingPathComponent("initrd").path : "missing"),
-            ("rootfs", rootfsExists ? paths.rootfsImagePath.path : "missing"),
-            ("docker", dockerAvailable ? "available" : "missing"),
-            ("config", "node=\(config.runtime.node ?? "auto") bun=\(config.runtime.bun ?? "auto") cpus=\(config.vm.cpus) mem=\(config.vm.memoryMB)MB"),
-        ])
-
-        var issues: [String] = []
-        if !kernelExists || !initrdExists || !rootfsExists {
-            issues.append("Run scripts/prepare-runtime.sh to build runtime artifacts.")
-        }
-        if !dockerAvailable {
-            issues.append("Docker is required to build rootfs.img. Install Docker Desktop for Mac.")
-        }
-
-        if issues.isEmpty {
+        if report.issues.isEmpty {
             TerminalUI.blank(.stdout)
             TerminalUI.success("all checks passed", stream: .stdout)
         } else {
             TerminalUI.blank(.stdout)
-            for issue in issues {
+            for issue in report.issues {
                 TerminalUI.warning(issue, stream: .stdout)
             }
         }
