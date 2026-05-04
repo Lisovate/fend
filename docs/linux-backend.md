@@ -1,0 +1,140 @@
+# Linux Backend Plan
+
+Fend's Linux support should preserve the macOS product shape: one command, one
+project VM, project directory mounted in, secrets outside the VM, network policy
+controlled per command, and warm reuse for repeated commands.
+
+The Linux implementation should be split into phases. Each phase should leave
+the repo in a shippable or at least testable state.
+
+## Phase 0: Baseline Quality
+
+Goal: keep the current macOS implementation stable while Linux work starts.
+
+- Keep `swift test --package-path swift` passing.
+- Keep guest protocol tests reliable under concurrent stdin/signal/window-size
+  writes.
+- Keep public docs honest about platform support: macOS is supported today;
+  Linux is in development.
+
+Exit criteria:
+
+- Full Swift suite passes locally.
+- Current npm wrapper still rejects unsupported platforms clearly.
+- No Linux planning changes alter macOS behavior.
+
+## Phase 1: Linux Backend Design Spike
+
+Goal: prove the Linux VM shape before building packaging or polish.
+
+Assumption for the first spike: use QEMU/KVM as the compatibility backend. It
+is larger than a custom VMM, but it lets us prove the important product
+questions quickly: KVM availability, VirtioFS workspace mount, vsock control,
+rootless networking, port forwarding, and `fendd` reuse.
+
+Target requirements:
+
+- x86_64 Linux host.
+- `/dev/kvm` exists and is accessible by the user.
+- Intel VT-x or AMD-V enabled in firmware.
+- Kernel 5.10+ recommended.
+- QEMU with KVM, virtiofs, virtio-vsock, and virtio-net support.
+- `virtiofsd` for project/cache/tool mounts.
+- `passt` for rootless user networking, unless the distro path forces a
+  different first implementation.
+
+Exit criteria:
+
+- A documented manual QEMU command boots the Fend kernel/initrd/rootfs on Linux.
+- The guest starts `fendd`.
+- Host can connect to `fendd` over vsock.
+- `fendd` can run a simple command in `/workspace`.
+- `--network off` still isolates the child process network namespace.
+
+## Phase 2: Backend Boundary
+
+Goal: separate host orchestration from macOS Virtualization.framework specifics.
+
+Proposed boundary:
+
+- `VMBackend`: start, stop, pause/resume if available, connect vsock, status.
+- `DarwinVirtualizationBackend`: wraps the existing `VMInstance` behavior.
+- `LinuxQemuBackend`: launches and supervises QEMU/KVM.
+- Shared code remains responsible for config, audit, env filtering, terminal IO,
+  protocol framing, and command policy.
+
+Exit criteria:
+
+- macOS code still uses Apple Virtualization.framework.
+- Linux-specific code is isolated behind build/platform checks.
+- Unit tests cover backend selection and command policy without booting a VM.
+
+## Phase 3: Linux MVP
+
+Goal: `fend <command>` works on a Linux workstation for common Node workflows.
+
+Scope:
+
+- Boot or reuse one VM per project.
+- Mount workspace, npm cache, and tools.
+- Run `node`, `npm`, `pnpm`, `bun`, and shell commands through `fendd`.
+- Support network on/off.
+- Stream stdout/stderr and forward signals.
+- Apply Linux watch policy: `auto` uses polling for likely dev-server commands.
+
+Exit criteria:
+
+- `fend node -v` works on Linux x86_64.
+- `fend npm install` writes `node_modules` to the host project through VirtioFS.
+- `fend --network off node -e ...` fails outbound DNS/connectivity.
+- `fend npm run dev` exposes the dev server on localhost.
+- Basic docs cover Arch setup first.
+
+## Phase 4: Linux Product Polish
+
+Goal: make Linux feel close to the macOS experience.
+
+- Add `fend doctor` Linux checks for `/dev/kvm`, group permissions, QEMU,
+  `virtiofsd`, `passt`, kernel version, and nested virtualization.
+- Improve terminal errors for missing KVM, denied `/dev/kvm`, missing
+  `virtiofsd`, and missing `passt`.
+- Add npm platform package target `linux-x64`.
+- Add CI build jobs for Linux binaries.
+- Add soak tests on Arch and Ubuntu.
+
+Exit criteria:
+
+- Fresh Arch user has a short setup path.
+- Missing prerequisites produce actionable `doctor` output.
+- Linux binary can be distributed through npm optional dependencies.
+
+## Phase 5: Mirror Watch Mode
+
+Goal: replace Linux polling for long-running dev servers where polling overhead
+is too high.
+
+Design:
+
+- Host project remains the source of truth.
+- Fend mirrors source files into a guest-local ext4 workspace.
+- Dev server runs from the guest-local workspace.
+- Guest outputs are disposable by default.
+- Default ignores include `.git`, `node_modules`, package-manager caches,
+  `.next`, `dist`, `build`, and other generated directories.
+
+Exit criteria:
+
+- HMR works without polling for Vite/Next/Webpack-style projects.
+- Guest-generated files do not overwrite host source unless explicitly allowed.
+- Deletes and renames are handled deterministically.
+
+## Open Decisions
+
+- Whether the Linux CLI remains Swift long term or moves to Rust. The fastest
+  path is to keep shared Swift CLI logic while the QEMU backend is proven; the
+  long-term packaging and dependency story may still favor Rust.
+- Whether to bundle QEMU/virtiofsd/passt or rely on distro packages. For the
+  first Linux MVP, distro packages are simpler. For supply-chain control,
+  bundling pinned builds may be better later.
+- Whether a custom `rust-vmm` backend is worth the engineering cost after the
+  QEMU/KVM MVP proves the product path.
