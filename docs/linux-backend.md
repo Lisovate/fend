@@ -71,8 +71,9 @@ Phase 1 spike artifacts now live in the repo:
 - `linux/` is the separate Rust host-side implementation area for Linux. The
   first modules build the pure QEMU/KVM command model and Linux doctor/preflight
   report without launching QEMU. It also includes a small `fend-linux` spike
-  binary so the Rust path can render Linux doctor output and inspect the launch
-  plan before it grows into the full Linux host runner.
+  binary so the Rust path can render Linux doctor output, inspect the launch
+  plan, and supervise the first QEMU launch path before it grows into the full
+  Linux host runner.
 
 Runtime image architecture is now split by script. Tool download resolution is
 platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
@@ -109,6 +110,7 @@ bash -n scripts/prepare-linux-x86_64-runtime.sh
 bash -n scripts/linux-qemu-spike.sh
 scripts/test-linux-spike-scripts.sh
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /tmp/project
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- launch --help
 cargo test --manifest-path fendd/Cargo.toml
 cargo test --manifest-path linux/Cargo.toml
 swift test --package-path swift
@@ -120,11 +122,26 @@ On a Linux host, run no-boot preflight before launching QEMU:
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- doctor
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /path/to/project
 scripts/prepare-linux-x86_64-runtime.sh --check
-scripts/linux-qemu-spike.sh --check /path/to/project
 ```
 
 After the builder places x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
-`~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch the VM:
+`~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch through
+the Rust Linux supervisor:
+
+```bash
+FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
+  cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- launch /path/to/project
+```
+
+The shell spike remains useful as a readable reference and fallback while the
+Rust Linux host runner is built out:
+
+```bash
+scripts/prepare-linux-x86_64-runtime.sh --check
+scripts/linux-qemu-spike.sh --check /path/to/project
+```
+
+To launch with the shell spike instead:
 
 ```bash
 FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \

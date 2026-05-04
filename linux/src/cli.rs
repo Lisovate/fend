@@ -13,6 +13,7 @@ pub enum CliCommand {
     Help(HelpTopic),
     Doctor(DoctorOptions),
     Plan(PlanOptions),
+    Launch(PlanOptions),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,7 @@ pub enum HelpTopic {
     General,
     Doctor,
     Plan,
+    Launch,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -84,6 +86,7 @@ pub enum CliError {
     UnexpectedArgument(String),
     InvalidNetwork(String),
     InvalidNumber { option: &'static str, value: String },
+    HelpRequested(HelpTopic),
 }
 
 impl fmt::Display for CliError {
@@ -99,6 +102,7 @@ impl fmt::Display for CliError {
             Self::InvalidNumber { option, value } => {
                 write!(f, "invalid numeric value for {option}: {value:?}")
             }
+            Self::HelpRequested(_) => write!(f, "help requested"),
         }
     }
 }
@@ -106,7 +110,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 pub fn usage() -> &'static str {
-    "usage: fend-linux <command> [options]\n\ncommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n\ncommon options:\n  -h, --help\n\nrun 'fend-linux doctor --help' or 'fend-linux plan --help' for command options.\n"
+    "usage: fend-linux <command> [options]\n\ncommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n\ncommon options:\n  -h, --help\n\nrun 'fend-linux doctor --help', 'fend-linux plan --help', or 'fend-linux launch --help' for command options.\n"
 }
 
 pub fn doctor_usage() -> &'static str {
@@ -115,6 +119,10 @@ pub fn doctor_usage() -> &'static str {
 
 pub fn plan_usage() -> &'static str {
     "usage: fend-linux plan [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+}
+
+pub fn launch_usage() -> &'static str {
+    "usage: fend-linux launch [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
@@ -131,6 +139,7 @@ where
         "-h" | "--help" | "help" => Ok(CliCommand::Help(HelpTopic::General)),
         "doctor" => parse_doctor(args),
         "plan" => parse_plan(args),
+        "launch" => parse_launch(args),
         other => Err(CliError::UnknownCommand(other.to_string())),
     }
 }
@@ -212,6 +221,21 @@ pub fn build_launch_config(options: &PlanOptions, defaults: &PlanDefaults) -> La
     config
 }
 
+pub fn build_supervised_launch_config(
+    options: &PlanOptions,
+    defaults: &PlanDefaults,
+) -> LaunchConfig {
+    let mut config = build_launch_config(options, defaults);
+    if options.run_dir.is_none() && defaults.run_dir.is_none() {
+        config.run_dir = defaults.temp_dir.join(format!(
+            "fend-linux.{}.{}",
+            std::process::id(),
+            defaults.epoch
+        ));
+    }
+    config
+}
+
 pub fn render_doctor_report(report: &DoctorReport) -> String {
     let mut output = String::new();
     let width = report
@@ -289,25 +313,44 @@ fn parse_doctor(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
 }
 
 fn parse_plan(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
+    match parse_plan_options(&mut args, HelpTopic::Plan) {
+        Ok(options) => Ok(CliCommand::Plan(options)),
+        Err(CliError::HelpRequested(topic)) => Ok(CliCommand::Help(topic)),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_launch(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
+    match parse_plan_options(&mut args, HelpTopic::Launch) {
+        Ok(options) => Ok(CliCommand::Launch(options)),
+        Err(CliError::HelpRequested(topic)) => Ok(CliCommand::Help(topic)),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_plan_options(
+    args: &mut VecDeque<String>,
+    help_topic: HelpTopic,
+) -> Result<PlanOptions, CliError> {
     let mut options = PlanOptions::default();
     while let Some(arg) = args.pop_front() {
         match arg.as_str() {
-            "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Plan)),
-            "--runtime-dir" => options.runtime_dir = Some(value_path(&mut args, "--runtime-dir")?),
-            "--workspace" => options.workspace = Some(value_path(&mut args, "--workspace")?),
-            "--cache-dir" => options.cache_dir = Some(value_path(&mut args, "--cache-dir")?),
-            "--tools-dir" => options.tools_dir = Some(value_path(&mut args, "--tools-dir")?),
-            "--run-dir" => options.run_dir = Some(value_path(&mut args, "--run-dir")?),
-            "--cid" => options.guest_cid = Some(value_number(&mut args, "--cid")?),
-            "--cpus" => options.cpus = Some(value_number(&mut args, "--cpus")?),
-            "--memory-mib" => options.memory_mib = Some(value_number(&mut args, "--memory-mib")?),
+            "-h" | "--help" => return Err(CliError::HelpRequested(help_topic)),
+            "--runtime-dir" => options.runtime_dir = Some(value_path(args, "--runtime-dir")?),
+            "--workspace" => options.workspace = Some(value_path(args, "--workspace")?),
+            "--cache-dir" => options.cache_dir = Some(value_path(args, "--cache-dir")?),
+            "--tools-dir" => options.tools_dir = Some(value_path(args, "--tools-dir")?),
+            "--run-dir" => options.run_dir = Some(value_path(args, "--run-dir")?),
+            "--cid" => options.guest_cid = Some(value_number(args, "--cid")?),
+            "--cpus" => options.cpus = Some(value_number(args, "--cpus")?),
+            "--memory-mib" => options.memory_mib = Some(value_number(args, "--memory-mib")?),
             "--network" => {
-                let value = value(&mut args, "--network")?;
+                let value = value(args, "--network")?;
                 options.network = Some(network_mode_from_str(&value)?);
             }
-            "--epoch" => options.epoch = Some(value_number(&mut args, "--epoch")?),
+            "--epoch" => options.epoch = Some(value_number(args, "--epoch")?),
             "--guest-workspace" => {
-                options.guest_workspace = value(&mut args, "--guest-workspace")?;
+                options.guest_workspace = value(args, "--guest-workspace")?;
             }
             other if other.starts_with('-') => return Err(CliError::UnknownOption(arg)),
             _ => {
@@ -318,7 +361,7 @@ fn parse_plan(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
             }
         }
     }
-    Ok(CliCommand::Plan(options))
+    Ok(options)
 }
 
 fn value(args: &mut VecDeque<String>, option: &'static str) -> Result<String, CliError> {
@@ -454,6 +497,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_launch_with_command_specific_help() {
+        assert_eq!(
+            parse_args(["launch", "--help"]).unwrap(),
+            CliCommand::Help(HelpTopic::Launch)
+        );
+
+        let command = parse_args(["launch", "/repo/app", "--network", "off"]).unwrap();
+        let CliCommand::Launch(options) = command else {
+            panic!("expected launch command");
+        };
+        assert_eq!(options.workspace, Some(PathBuf::from("/repo/app")));
+        assert_eq!(options.network, Some(NetworkMode::Off));
+    }
+
+    #[test]
     fn rejects_invalid_cli_values() {
         assert_eq!(
             parse_args(["plan", "--network", "bridge"]).unwrap_err(),
@@ -499,6 +557,17 @@ mod tests {
         assert_eq!(config.memory_mib, 2048);
         assert_eq!(config.network, NetworkMode::Off);
         assert_eq!(config.epoch, 1234);
+    }
+
+    #[test]
+    fn supervised_launch_config_uses_unique_run_dir_by_default() {
+        let defaults = sample_defaults();
+        let config = build_supervised_launch_config(&PlanOptions::default(), &defaults);
+
+        assert_eq!(
+            config.run_dir,
+            PathBuf::from(format!("/tmp/fend-linux.{}.1234", std::process::id()))
+        );
     }
 
     #[test]

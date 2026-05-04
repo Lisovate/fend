@@ -1,12 +1,13 @@
 use std::process::ExitCode;
 
 use fend_linux::cli::{
-    build_launch_config, doctor_usage, parse_args, plan_defaults_from_env, plan_usage,
-    render_doctor_report, render_launch_plan, resolve_doctor_runtime_dir, usage, CliCommand,
-    HelpTopic,
+    build_launch_config, build_supervised_launch_config, doctor_usage, launch_usage, parse_args,
+    plan_defaults_from_env, plan_usage, render_doctor_report, render_launch_plan,
+    resolve_doctor_runtime_dir, usage, CliCommand, HelpTopic,
 };
 use fend_linux::doctor;
 use fend_linux::qemu;
+use fend_linux::supervisor::{Supervisor, SupervisorOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -30,6 +31,7 @@ fn run() -> Result<ExitCode, String> {
                     HelpTopic::General => usage(),
                     HelpTopic::Doctor => doctor_usage(),
                     HelpTopic::Plan => plan_usage(),
+                    HelpTopic::Launch => launch_usage(),
                 }
             );
             Ok(ExitCode::SUCCESS)
@@ -51,6 +53,21 @@ fn run() -> Result<ExitCode, String> {
             let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
             print!("{}", render_launch_plan(&plan));
             Ok(ExitCode::SUCCESS)
+        }
+        CliCommand::Launch(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let config = build_supervised_launch_config(&options, &defaults);
+            let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
+            let mut supervisor = Supervisor::new(SupervisorOptions::default());
+            let mut vm = supervisor
+                .launch_plan(&plan)
+                .map_err(|error| error.to_string())?;
+            let status = vm.wait_for_qemu().map_err(|error| error.to_string())?;
+            if status.code == Some(0) {
+                Ok(ExitCode::SUCCESS)
+            } else {
+                Ok(ExitCode::FAILURE)
+            }
         }
     }
 }
