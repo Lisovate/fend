@@ -252,7 +252,32 @@ public struct FramedMessage {
     /// Write a framed message to a file descriptor.
     public func write(to fd: Int32) throws {
         let encoded = self.encode()
-        try writeAllData(fd: fd, data: encoded)
+        try FramedMessageWriteLocks.withLock(for: fd) {
+            try writeAllData(fd: fd, data: encoded)
+        }
+    }
+}
+
+private enum FramedMessageWriteLocks {
+    private static let tableLock = NSLock()
+    private static var locks: [Int32: NSLock] = [:]
+
+    static func withLock<T>(for fd: Int32, _ body: () throws -> T) throws -> T {
+        let lock = lock(for: fd)
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
+    }
+
+    private static func lock(for fd: Int32) -> NSLock {
+        tableLock.lock()
+        defer { tableLock.unlock() }
+        if let lock = locks[fd] {
+            return lock
+        }
+        let lock = NSLock()
+        locks[fd] = lock
+        return lock
     }
 }
 
