@@ -10,6 +10,7 @@ swift/Package.resolved
 
 # Rust build artifacts
 fendd/target/
+linux/target/
 
 # Node
 node_modules/

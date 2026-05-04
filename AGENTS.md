@@ -10,7 +10,8 @@ macOS Apple Silicon MVP is implemented end-to-end (Swift CLI, daemon, warm-VM li
 
 - **macOS CLI + daemon:** Swift + Apple Virtualization.framework (`swift/`)
 - **Guest agent (fendd):** Rust, runs as PID 1 inside the VM (`fendd/`)
-- **Windows/Linux CLI:** Rust (not started)
+- **Linux host implementation:** Rust (`linux/`, early QEMU/KVM planning code)
+- **Windows CLI:** Rust (not started)
 - **Filesystem:** VirtioFS for project directory mounting
 - **Config:** `.fend.toml`
 - **Host↔VM protocol:** virtio-vsock with custom binary framing
@@ -25,4 +26,5 @@ macOS Apple Silicon MVP is implemented end-to-end (Swift CLI, daemon, warm-VM li
 - `ARCHITECTURE.md` — VM lifecycle, scenarios, design decisions, system diagrams
 - `../ROADMAP.md` *(outside the public repo)* — full strategy, business model, marketing plan
 - `swift/` — macOS Swift CLI + daemon implementation
+- `linux/` — separate Rust Linux host implementation
 - `fendd/` — Rust guest agent

@@ -68,6 +68,9 @@ Phase 1 spike artifacts now live in the repo:
 - `scripts/test-linux-spike-scripts.sh` runs host-independent shell checks with
   mocked Linux/KVM tools. It validates argument parsing, preflight checks,
   runtime artifact detection, and failure messages without booting QEMU.
+- `linux/` is the separate Rust host-side implementation area for Linux. The
+  first module, `fend_linux::qemu`, builds the pure QEMU/KVM command model
+  without launching processes.
 
 Runtime image architecture is now split by script. Tool download resolution is
 platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
@@ -150,7 +153,8 @@ Proposed boundary:
 
 - `VMBackend`: start, stop, pause/resume if available, connect vsock, status.
 - `DarwinVirtualizationBackend`: wraps the existing `VMInstance` behavior.
-- `LinuxQemuBackend`: launches and supervises QEMU/KVM.
+- `LinuxQemuBackend`: implemented separately in Rust under `linux/`; launches
+  and supervises QEMU/KVM.
 - Shared code remains responsible for config, audit, env filtering, terminal IO,
   protocol framing, and command policy.
 
@@ -203,6 +207,13 @@ Progress: the CLI now has a unit-tested Linux doctor evaluator for x86_64,
 QEMU, `virtiofsd`, `passt`, Docker, Rust musl target, `/dev/kvm`,
 `/dev/vhost-vsock`, CPU virtualization flags, and Linux runtime artifacts. The
 checks will become directly runnable once the CLI package is built on Linux.
+
+Direction change: Linux backend work should stay separate from the Swift macOS
+host implementation. New Linux host orchestration code lives under `linux/` in
+Rust; Swift remains the macOS CLI/daemon implementation unless there is a small
+cross-platform surface worth sharing deliberately. The existing Swift Linux
+doctor evaluator should be treated as transitional and moved into the Rust
+Linux preflight path before Linux is wired into the user-facing CLI.
 
 ## Phase 5: Mirror Watch Mode
 
