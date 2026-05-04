@@ -12,6 +12,8 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.vm.cpus, 2)
         XCTAssertEqual(config.vm.memoryMB, 2048)
         XCTAssertEqual(config.network.mode, .on)
+        XCTAssertEqual(config.watch.mode, .auto)
+        XCTAssertEqual(config.watch.pollIntervalMs, 500)
     }
 
     func testDefaultRuntimeConfig() {
@@ -29,6 +31,12 @@ final class ConfigTests: XCTestCase {
     func testDefaultNetworkConfig() {
         let network = NetworkConfig()
         XCTAssertEqual(network.mode, .on)
+    }
+
+    func testDefaultWatchConfig() {
+        let watch = WatchConfig()
+        XCTAssertEqual(watch.mode, .auto)
+        XCTAssertEqual(watch.pollIntervalMs, 500)
     }
 
     // MARK: - Load from non-existent file
@@ -97,6 +105,23 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(FendConfig.parse(toml: "[network]\nmode = \"enabled\"").network.mode, .on)
     }
 
+    func testParseTOMLWatch() {
+        let toml = """
+        [watch]
+        mode = "polling"
+        poll_interval_ms = 750
+        """
+        let config = FendConfig.parse(toml: toml)
+        XCTAssertEqual(config.watch.mode, .polling)
+        XCTAssertEqual(config.watch.pollIntervalMs, 750)
+    }
+
+    func testParseTOMLWatchAliases() {
+        XCTAssertEqual(FendConfig.parse(toml: "[watch]\nmode = \"poll\"").watch.mode, .polling)
+        XCTAssertEqual(FendConfig.parse(toml: "[watch]\nmode = \"inotify\"").watch.mode, .native)
+        XCTAssertEqual(FendConfig.parse(toml: "[watch]\nmode = \"sync\"").watch.mode, .mirror)
+    }
+
     func testParseTOMLWithComments() {
         let toml = """
         # This is a comment
@@ -154,6 +179,23 @@ final class ConfigTests: XCTestCase {
         XCTAssertTrue(result.diagnostics.map(\.message).contains("invalid network.mode value 'blocked' ignored"))
     }
 
+    func testParseDiagnosticsForInvalidWatchValues() {
+        let toml = """
+        [watch]
+        mode = "telepathy"
+        poll_interval_ms = 0
+        """
+
+        let result = FendConfig.parseWithDiagnostics(toml: toml)
+
+        XCTAssertEqual(result.config.watch.mode, .auto)
+        XCTAssertEqual(result.config.watch.pollIntervalMs, 500)
+        XCTAssertEqual(result.diagnostics, [
+            ConfigDiagnostic(line: 2, message: "invalid watch.mode value 'telepathy' ignored"),
+            ConfigDiagnostic(line: 3, message: "invalid watch.poll_interval_ms value '0' ignored"),
+        ])
+    }
+
     func testParseDiagnosticsForUnknownKeysAndSections() {
         let toml = """
         [runtime]
@@ -185,6 +227,10 @@ final class ConfigTests: XCTestCase {
 
         [network]
         mode = "off"
+
+        [watch]
+        mode = "native"
+        poll_interval_ms = 250
         """
         let config = FendConfig.parse(toml: toml)
         XCTAssertEqual(config.runtime.node, "22.11.0")
@@ -192,5 +238,7 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(config.vm.cpus, 4)
         XCTAssertEqual(config.vm.memoryMB, 4096)
         XCTAssertEqual(config.network.mode, .off)
+        XCTAssertEqual(config.watch.mode, .native)
+        XCTAssertEqual(config.watch.pollIntervalMs, 250)
     }
 }

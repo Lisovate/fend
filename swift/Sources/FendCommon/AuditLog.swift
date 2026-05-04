@@ -15,6 +15,7 @@ public struct AuditEntry: Codable {
     public var network: [String]?
     public var networkMode: String?
     public var networkEvents: [NetworkEvent]?
+    public var watchMode: String?
     public var fsDiff: FsDiffSummary?
 
     public init(
@@ -29,6 +30,7 @@ public struct AuditEntry: Codable {
         network: [String]? = nil,
         networkMode: String? = nil,
         networkEvents: [NetworkEvent]? = nil,
+        watchMode: String? = nil,
         fsDiff: FsDiffSummary? = nil
     ) {
         self.timestamp = timestamp
@@ -42,6 +44,7 @@ public struct AuditEntry: Codable {
         self.network = network
         self.networkMode = networkMode
         self.networkEvents = networkEvents
+        self.watchMode = watchMode
         self.fsDiff = fsDiff
     }
 }

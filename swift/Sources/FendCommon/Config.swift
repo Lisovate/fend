@@ -6,17 +6,20 @@ public struct FendConfig {
     public let vm: VMConfig
     public let audit: AuditConfig
     public let network: NetworkConfig
+    public let watch: WatchConfig
 
     public init(
         runtime: RuntimeConfig = .init(),
         vm: VMConfig = .init(),
         audit: AuditConfig = .init(),
-        network: NetworkConfig = .init()
+        network: NetworkConfig = .init(),
+        watch: WatchConfig = .init()
     ) {
         self.runtime = runtime
         self.vm = vm
         self.audit = audit
         self.network = network
+        self.watch = watch
     }
 
     /// Load config from a .fend.toml file, or return defaults if not found.
@@ -30,8 +33,8 @@ public struct FendConfig {
         return result.config
     }
 
-    /// Parse minimal TOML config. Supports [runtime], [vm], [audit], and
-    /// [network] sections.
+    /// Parse minimal TOML config. Supports [runtime], [vm], [audit],
+    /// [network], and [watch] sections.
     internal static func parse(toml content: String) -> FendConfig {
         parseWithDiagnostics(toml: content).config
     }
@@ -43,6 +46,8 @@ public struct FendConfig {
         var cpus: Int? = nil
         var memoryMB: UInt64? = nil
         var networkMode: NetworkMode? = nil
+        var watchMode: WatchMode? = nil
+        var watchPollIntervalMs: Int? = nil
         var auditLevel: AuditLevel? = nil
         var auditRebuild: Bool? = nil
         var auditAutoApproveCI: Bool? = nil
@@ -51,7 +56,7 @@ public struct FendConfig {
         var auditFixOnInstall: Bool? = nil
         var auditIncludePrerelease: Bool? = nil
         var diagnostics: [ConfigDiagnostic] = []
-        let knownSections: Set<String> = ["runtime", "vm", "network", "audit"]
+        let knownSections: Set<String> = ["runtime", "vm", "network", "watch", "audit"]
 
         for (idx, line) in content.components(separatedBy: .newlines).enumerated() {
             let lineNumber = idx + 1
@@ -114,6 +119,18 @@ public struct FendConfig {
                 } else {
                     diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid network.mode value '\(value)' ignored"))
                 }
+            case ("watch", "mode"):
+                if let parsed = WatchMode.parse(value) {
+                    watchMode = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid watch.mode value '\(value)' ignored"))
+                }
+            case ("watch", "poll_interval_ms"):
+                if let parsed = Int(value), parsed > 0 {
+                    watchPollIntervalMs = parsed
+                } else {
+                    diagnostics.append(ConfigDiagnostic(line: lineNumber, message: "invalid watch.poll_interval_ms value '\(value)' ignored"))
+                }
             case ("audit", "level"):
                 if let parsed = AuditLevel.parse(value) {
                     auditLevel = parsed
@@ -164,6 +181,10 @@ public struct FendConfig {
             ),
             network: NetworkConfig(
                 mode: networkMode ?? NetworkConfig().mode
+            ),
+            watch: WatchConfig(
+                mode: watchMode ?? WatchConfig().mode,
+                pollIntervalMs: watchPollIntervalMs ?? WatchConfig().pollIntervalMs
             )
         )
         return ConfigParseResult(config: config, diagnostics: diagnostics)
@@ -269,5 +290,33 @@ public struct NetworkConfig {
 
     public init(mode: NetworkMode = .on) {
         self.mode = mode
+    }
+}
+
+public enum WatchMode: String, Codable {
+    case auto
+    case native
+    case polling
+    case mirror
+
+    public static func parse(_ value: String?) -> WatchMode? {
+        guard let value else { return nil }
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "auto": return .auto
+        case "native", "inotify", "fsnotify": return .native
+        case "polling", "poll": return .polling
+        case "mirror", "sync": return .mirror
+        default: return nil
+        }
+    }
+}
+
+public struct WatchConfig {
+    public let mode: WatchMode
+    public let pollIntervalMs: Int
+
+    public init(mode: WatchMode = .auto, pollIntervalMs: Int = 500) {
+        self.mode = mode
+        self.pollIntervalMs = pollIntervalMs
     }
 }

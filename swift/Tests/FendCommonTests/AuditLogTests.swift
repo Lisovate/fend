@@ -16,6 +16,7 @@ final class AuditLogTests: XCTestCase {
             networkEvents: [
                 NetworkEvent(remote: "93.184.216.34", port: 443, state: "established")
             ],
+            watchMode: "polling",
             fsDiff: FsDiffSummary(
                 outsideNodeModules: 1,
                 touchedFiles: [".env"],
@@ -29,6 +30,7 @@ final class AuditLogTests: XCTestCase {
 
         XCTAssertEqual(decoded.networkMode, "off")
         XCTAssertEqual(decoded.networkEvents?.first?.remote, "93.184.216.34")
+        XCTAssertEqual(decoded.watchMode, "polling")
         XCTAssertEqual(decoded.fsDiff?.risk, "high")
     }
 
@@ -49,6 +51,7 @@ final class AuditLogTests: XCTestCase {
 
         XCTAssertNil(entry.networkMode)
         XCTAssertNil(entry.networkEvents)
+        XCTAssertNil(entry.watchMode)
         XCTAssertNil(entry.fsDiff)
     }
 }

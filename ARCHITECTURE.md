@@ -423,11 +423,12 @@ USER edits src/app/page.tsx in VS Code (on host)
   ▼
 VirtioFS propagates change to VM
   │
-  │  VirtioFS supports inotify for MODIFY events
-  │  (CREATE and MODIFY work reliably; DELETE has known gaps)
+  │  File contents are visible in the guest, but host-to-guest
+  │  inotify delivery is not reliable across VirtioFS implementations
   │
   ▼
-VM: chokidar/watchpack detects file change via inotify
+VM: chokidar/watchpack detects the file change
+    (native notifications on macOS today, polling on Linux alpha)
   │
   │  Next.js/Turbopack receives change notification
   │  Recompiles the changed module (~50-200ms)
@@ -445,21 +446,29 @@ Browser: receives HMR payload, hot-swaps module
   ▼
 USER sees updated UI
 
-Total latency: ~200-500ms (vs ~100-300ms native)
-  - VirtioFS inotify propagation: ~10-50ms
+Total latency: ~200-1000ms depending on watch mode (vs ~100-300ms native)
+  - Native VirtioFS notification or polling interval: ~10-500ms
   - Recompilation: ~50-200ms (same as native, CPU bound)
   - WebSocket round trip through proxy: ~5ms
-  - Overhead vs native: ~100-200ms, mostly VirtioFS notification delay
+  - Overhead vs native: mostly filesystem notification delay
 ```
 
-**Critical detail: inotify limitations.** VirtioFS supports inotify for file MODIFY and CREATE events, but DELETE events have known gaps in some implementations. For HMR this is acceptable because:
-- File edits (MODIFY) are the primary HMR trigger, and these work
-- File creation (new components) also works
-- File deletion rarely triggers HMR (usually requires a page reload anyway)
+**Critical detail: inotify limitations.** Current VirtioFS/virtiofsd stacks do
+not consistently deliver host-to-guest file watcher events. The changed file is
+visible when the guest reads it, but a dev server watching from inside the guest
+may not receive an inotify event for an edit made by the host editor.
 
-**Fallback: polling mode.** If a project's file watcher doesn't receive inotify events reliably, fend can inject `CHOKIDAR_USEPOLLING=true` and `CHOKIDAR_INTERVAL=500` as a fallback. This uses ~2-5% more CPU but guarantees change detection. Next.js/Vite/webpack all support polling mode.
+**Linux alpha behavior: polling mode.** For likely dev-server commands on
+Linux, `watch.mode = "auto"` resolves to polling and fend injects
+`CHOKIDAR_USEPOLLING=true`, `CHOKIDAR_INTERVAL=500`, and
+`WATCHPACK_POLLING=true`. This uses more CPU than native notifications but
+keeps Vite/Next/Webpack-style workflows functional.
 
-The fend daemon inside the VM can also run its own fsevents-to-inotify bridge (similar to OrbStack's fsnotify-macvirt approach): a small process that watches the VirtioFS mount for changes and generates synthetic inotify events to guarantee coverage of edge cases that raw VirtioFS misses.
+**Planned Linux quality mode: mirror.** In `watch.mode = "mirror"`, host source
+files remain the source of truth, but fend copies source changes into a
+guest-local ext4 workspace and runs the dev server there. VM outputs are
+disposable by default. Because writes happen on a normal guest filesystem,
+guest inotify works naturally without polling.
 
 ### Can the User Ctrl+C?
 
@@ -971,56 +980,44 @@ Host filesystem:        VM internal (ext4):        Sync:
 
 ### The Problem
 
-When a developer edits a file on the host (macOS), the change must propagate to the VM (Linux) so that the dev server (Next.js/Vite/webpack) can detect it and trigger HMR.
+When a developer edits a file on the host, the change must become visible to
+the VM so that the dev server (Next.js/Vite/webpack) can trigger HMR. The hard
+part is not file visibility; VirtioFS handles that. The hard part is reliable
+host-to-guest watcher notification.
 
-The chain: macOS FSEvents → VirtioFS → Linux inotify → chokidar/watchpack → bundler → WebSocket → browser.
+The desired chain is: host watcher → VirtioFS or sync layer → Linux watcher →
+chokidar/watchpack → bundler → WebSocket → browser.
 
 ### Current State of VirtioFS File Notifications
 
-Based on research of Docker Desktop, OrbStack, Lima, and the VirtioFS kernel patches:
+Based on current VirtioFS/virtiofsd behavior:
 
-| Event Type | VirtioFS Support | Notes |
+| Capability | Status | Notes |
 |---|---|---|
-| MODIFY | Works reliably | File content changes propagate correctly |
-| CREATE | Works reliably | New files detected |
-| DELETE | Broken/Missing | Known gap in most VirtioFS implementations |
-| RENAME | Partial | Some implementations miss the CREATE half |
-| ATTRIB | Works | Permission/metadata changes |
+| Host edit visibility | Works | Guest reads see the new file contents |
+| Host-to-guest inotify | Not reliable | Guest watchers may miss host edits |
+| Guest-side inotify | Works on guest-local filesystems | Normal Linux behavior on ext4/tmpfs |
+| Polling | Works | Higher CPU and 500ms-class latency |
 
-For HMR, MODIFY is by far the most important event (editing existing source files). CREATE matters for new files/components. DELETE is rare in active development and usually requires a manual restart anyway.
+For HMR, missing host-to-guest inotify is enough to break the native-feeling
+workflow: the dev server can serve the changed file, but it may not know that it
+needs to rebuild.
 
 ### Fend's File Watching Strategy
 
-A three-layer approach:
+A two-stage approach:
 
-**Layer 1: Native VirtioFS inotify (default)**
+**Stage 1: Native where it works, polling on Linux alpha**
 
-VirtioFS propagates inotify events for MODIFY and CREATE. This handles 95% of HMR use cases. No extra configuration, no polling overhead.
+`watch.mode = "auto"` resolves by host platform and command type:
 
-**Layer 2: fendd fs-bridge daemon (enhancement)**
+| Host | Command | Effective Mode |
+|---|---|---|
+| macOS | Any command | `native` |
+| Linux | Likely dev server (`npm run dev`, `vite`, `next dev`, etc.) | `polling` |
+| Linux | Non-dev command (`npm install`, tests, builds) | `native` |
 
-A lightweight daemon inside the VM that uses a secondary notification channel to cover gaps:
-
-```
-Host:                              VM:
-┌──────────────┐                  ┌──────────────────┐
-│ fend CLI     │                  │ fendd            │
-│              │   vsock          │                  │
-│ FSEvents ────┼──────────────→   │ fs-bridge        │
-│ watcher on   │  FileChanged    │  ↓               │
-│ project dir  │  messages       │ synthetic inotify │
-│              │                  │ events on        │
-│              │                  │ /workspace/      │
-└──────────────┘                  └──────────────────┘
-```
-
-The host-side fend CLI watches the project directory using macOS FSEvents (which is reliable and efficient). When changes are detected, it sends `FileChanged` messages over vsock to fendd. fendd then generates synthetic inotify events on the VirtioFS mount point, ensuring the guest-side file watcher picks up the change.
-
-This is the approach OrbStack uses (fsnotify-macvirt). It closes the DELETE event gap and ensures reliable notification across the VM boundary.
-
-**Layer 3: Polling fallback (last resort)**
-
-If layers 1 and 2 fail (unlikely), fend injects polling configuration:
+Polling injects:
 
 ```
 CHOKIDAR_USEPOLLING=true
@@ -1028,20 +1025,47 @@ CHOKIDAR_INTERVAL=500
 WATCHPACK_POLLING=true
 ```
 
-This works universally but uses more CPU. Fend only activates this if the user explicitly enables it or if automatic detection determines that inotify events aren't propagating.
+Users can force a mode per command:
+
+```
+fend --watch polling npm run dev
+fend --watch native npm run dev
+```
+
+**Stage 2: mirror mode for product-grade Linux HMR**
+
+`watch.mode = "mirror"` is the planned Linux quality mode:
+
+```
+Host project (source of truth)
+  │
+  │ host watcher copies source changes
+  ▼
+Guest-local workspace on ext4
+  │
+  │ dev server watches normal Linux files
+  ▼
+chokidar/watchpack receives inotify events
+```
+
+Generated files and VM outputs are disposable by default. The initial mirror
+should sync source into the VM, ignore `.git`, `node_modules`, caches, and build
+outputs, and avoid syncing guest output back to the host unless a future
+explicit allowlist requires it.
 
 ### Expected HMR Latency
 
 | Setup | Edit-to-Render Latency |
 |---|---|
 | Native macOS | 100-300ms |
-| Fend (VirtioFS inotify) | 200-500ms |
-| Fend (fs-bridge) | 150-400ms |
+| Fend macOS (native VirtioFS path) | 200-500ms |
 | Fend (polling, 500ms) | 500-1000ms |
+| Fend Linux mirror mode target | 150-500ms |
 | Docker Desktop (VirtioFS) | 300-800ms |
 | Docker Desktop (polling) | 1000-3000ms |
 
-Fend's target with the fs-bridge layer is sub-500ms edit-to-render, which is imperceptible to most developers.
+The target for mirror mode is sub-500ms edit-to-render without the steady CPU
+cost of polling.
 
 ---
 
@@ -1111,7 +1135,7 @@ The overhead is concentrated in `npm install` (many small file writes). Once ins
 │        │            │                       │    │                  │
 │        │            │  - VM lifecycle mgmt   │    │                  │
 │        │            │  - vsock gRPC client   │    │                  │
-│        │            │  - FSEvents watcher   ◄────┤ port proxy       │
+│        │            │  - Watch mode/env     │    │ port proxy       │
 │        │            │  - Port proxy         ├────┘ localhost:3000   │
 │        │            │  - Signal forwarding   │    → vsock → VM:3000 │
 │        │            │  - Env var injection   │                      │
@@ -1135,7 +1159,7 @@ The overhead is concentrated in `npm install` (many small file writes). Once ins
 │  │  │  - Process supervisor (fork/exec commands)            │   │   │
 │  │  │  - Port detection (netlink socket monitoring)         │   │   │
 │  │  │  - Signal relay (host SIGINT → child process)         │   │   │
-│  │  │  - fs-bridge (vsock FileChanged → inotify events)     │   │   │
+│  │  │  - Watch env setup for polling-compatible dev tools    │   │   │
 │  │  │  - stdout/stderr streaming back to host               │   │   │
 │  │  │                                                       │   │   │
 │  │  │  Child processes:                                     │   │   │
@@ -1264,35 +1288,37 @@ fend npm install
            page.tsx in
            VS Code
            │
-  T+1ms    macOS writes
+  T+1ms    Host writes
            to disk
            │
-  T+5ms    FSEvents fires   ──────► fs-bridge receives
-           (fend CLI              synthetic inotify
-            watcher)               event on /workspace/
-           │                         │
-  T+10ms   VirtioFS also ─────────► inotify fires
-           propagates               (double-fire is
-           (native path)            deduplicated by
-                                    watchpack/chokidar)
+  T+5ms    VirtioFS makes ────────► file contents visible
+           new contents             in /workspace
+           visible                   │
                                      │
-  T+15ms                            Turbopack/webpack
+  T+10ms                            macOS native path:
+                                     watcher event arrives
+                                     │
+                                     │ Linux alpha path:
+                                     polling loop observes
+                                     change within interval
+                                     │
+  T+100-500ms                       Turbopack/webpack
                                     detects change
                                     recompiles module
                                      │
-  T+150ms                           Compilation done
+  T+250-650ms                       Compilation done
                                     (~100-150ms)
                                      │
-  T+155ms                           WebSocket push  ────────► HMR update
+  T+255-655ms                       WebSocket push  ────────► HMR update
                                     (via port proxy)          received
                                                               │
-  T+200ms                                                     React
+  T+300-700ms                                                 React
                                                               re-renders
                                                               │
-  T+250ms                                                     UI updated
+  T+350-750ms                                                 UI updated
                                                               on screen
 
-  Total: ~250ms edit-to-render (vs ~150ms native)
+  Total: ~200-1000ms depending on watch mode
 ```
 
 ---
@@ -1302,7 +1328,7 @@ fend npm install
 | Decision | Choice | Rationale |
 |---|---|---|
 | node_modules location | Host via VirtioFS | IDE must work natively; 10-15% install overhead is acceptable |
-| File watching | VirtioFS inotify + fs-bridge daemon | Covers 99% of cases; polling as last resort |
+| File watching | Native on macOS, polling for Linux dev commands, mirror planned | Current VirtioFS host-to-guest inotify is not reliable enough for Linux HMR |
 | VM per project | Yes, one VM per project directory | Isolation boundary matches project boundary |
 | Multiple commands | Same VM, multiple processes | Simpler, lower resource usage, matches native behavior |
 | Port forwarding | Automatic via netlink detection | Zero config for common case |

@@ -27,6 +27,10 @@ struct Run: AsyncParsableCommand {
             help: "Network policy for this command: on or off. Overrides [network].mode.")
     var network: String?
 
+    @Option(name: .long,
+            help: "File watching policy: auto, native, polling, or mirror. Overrides [watch].mode.")
+    var watch: String?
+
     @Argument(parsing: .captureForPassthrough, help: "Command and arguments to run in the sandbox")
     var command: [String] = []
 
@@ -36,11 +40,13 @@ struct Run: AsyncParsableCommand {
         }
         let extra = try parseExtraEnv(pairs: env, files: envFile)
         let networkOverride = try parseNetworkOverride(network)
+        let watchOverride = try parseWatchOverride(watch)
         try await Run.execute(
             command: command,
             extraEnv: extra,
             claudeMode: false,
-            networkOverride: networkOverride
+            networkOverride: networkOverride,
+            watchOverride: watchOverride
         )
     }
 
@@ -49,7 +55,8 @@ struct Run: AsyncParsableCommand {
         command: [String],
         extraEnv: [String: String],
         claudeMode: Bool,
-        networkOverride: NetworkMode? = nil
+        networkOverride: NetworkMode? = nil,
+        watchOverride: WatchMode? = nil
     ) async throws {
         // Bail out early on obvious argparse mistakes (e.g. `fend --update-db`
         // where the user meant `fend audit --update-db`). Without this we'd
@@ -66,6 +73,10 @@ struct Run: AsyncParsableCommand {
         try paths.ensureDirectories()
         let config = FendConfig.load(from: projectDir)
         let networkMode = networkOverride ?? config.network.mode
+        let requestedWatchMode = watchOverride ?? config.watch.mode
+        if requestedWatchMode == .mirror {
+            throw ValidationError("watch mode 'mirror' is planned but not implemented yet; use 'auto', 'native', or 'polling'")
+        }
 
         // Install-intent detection + audit. Must happen BEFORE enableRawMode()
         // so the interactive prompt reads a normal line from the tty.
@@ -150,7 +161,8 @@ struct Run: AsyncParsableCommand {
                         durationMs: 0,
                         exitCode: 2,
                         audit: auditSummary,
-                        networkMode: networkMode.rawValue
+                        networkMode: networkMode.rawValue,
+                        watchMode: requestedWatchMode.rawValue
                     ), paths: paths)
                     Foundation.exit(2)
                 case .denied:
@@ -164,7 +176,8 @@ struct Run: AsyncParsableCommand {
                         durationMs: 0,
                         exitCode: 130,
                         audit: auditSummary,
-                        networkMode: networkMode.rawValue
+                        networkMode: networkMode.rawValue,
+                        watchMode: requestedWatchMode.rawValue
                     ), paths: paths)
                     Foundation.exit(130)
                 case .clean, .approved:
@@ -177,6 +190,12 @@ struct Run: AsyncParsableCommand {
                 auditSummary = AuditEngine.summary(for: rawReport)
             }
         }
+
+        let watchPlan = try WatchPolicy.resolve(
+            requestedMode: requestedWatchMode,
+            command: finalCommand,
+            pollIntervalMs: config.watch.pollIntervalMs
+        )
 
         let isTTY = isatty(STDIN_FILENO) != 0
         SignalState.shared.ttyMode = isTTY
@@ -200,6 +219,7 @@ struct Run: AsyncParsableCommand {
 
         env["FEND_PROJECT"] = projectDir.lastPathComponent
         env["FEND_NETWORK_MODE"] = networkMode.rawValue
+        WatchPolicy.apply(watchPlan, to: &env)
 
         if claudeMode, let token = extractClaudeOAuthToken() {
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -242,13 +262,13 @@ struct Run: AsyncParsableCommand {
         // Try daemon first, then auto-start, then direct boot
         let runResult: RunResult
         do {
-            if let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
+            if let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY, watchPlan: watchPlan) {
                 runResult = result
             } else if autoStartDaemon(fendPath: ProcessInfo.processInfo.arguments[0]),
-                      let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY) {
+                      let result = try? runViaDaemon(paths: paths, projectDir: projectDir, command: finalCommand, env: env, tty: isTTY, watchPlan: watchPlan) {
                 runResult = result
             } else {
-                runResult = try await runDirect(paths: paths, projectDir: projectDir, command: finalCommand, env: env, start: start, tty: isTTY)
+                runResult = try await runDirect(paths: paths, projectDir: projectDir, command: finalCommand, env: env, start: start, tty: isTTY, watchPlan: watchPlan)
             }
         } catch {
             if isTTY {
@@ -287,6 +307,7 @@ struct Run: AsyncParsableCommand {
             audit: auditSummary,
             networkMode: networkMode.rawValue,
             networkEvents: runResult.networkEvents.isEmpty ? nil : Array(runResult.networkEvents.prefix(100)),
+            watchMode: watchPlan.auditValue,
             fsDiff: fsDiff
         ), paths: paths)
 
@@ -310,8 +331,16 @@ struct Run: AsyncParsableCommand {
         return mode
     }
 
+    private func parseWatchOverride(_ raw: String?) throws -> WatchMode? {
+        guard let raw else { return nil }
+        guard let mode = WatchMode.parse(raw) else {
+            throw ValidationError("--watch must be 'auto', 'native', 'polling', or 'mirror'")
+        }
+        return mode
+    }
+
     /// Run via the daemon (relay through Unix socket).
-    private static func runViaDaemon(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], tty: Bool) throws -> RunResult {
+    private static func runViaDaemon(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], tty: Bool, watchPlan: WatchPlan) throws -> RunResult {
         let daemonFd = connectToDaemon(socketPath: paths.socketPath)
         guard daemonFd >= 0 else { throw FendError.connectionClosed }
         defer {
@@ -342,6 +371,7 @@ struct Run: AsyncParsableCommand {
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
         TerminalUI.success("sandbox ready", detail: "\(String(format: "%.1f", elapsed))s")
+        printWatchHint(watchPlan)
 
         SignalState.shared.fd = daemonFd
         if tty { sendWindowSize(to: daemonFd) }
@@ -411,7 +441,7 @@ struct Run: AsyncParsableCommand {
     }
 
     /// Run directly (boot VM in-process, no daemon).
-    private static func runDirect(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], start: CFAbsoluteTime, tty: Bool) async throws -> RunResult {
+    private static func runDirect(paths: FendPaths, projectDir: URL, command: [String], env: [String: String], start: CFAbsoluteTime, tty: Bool, watchPlan: WatchPlan) async throws -> RunResult {
         let config = FendConfig.load(from: projectDir)
         let vmManager = VMManager(paths: paths)
         let vmInstance = try await vmManager.vmForProject(projectDir, config: config)
@@ -426,6 +456,7 @@ struct Run: AsyncParsableCommand {
         try guest.waitForReady()
 
         TerminalUI.success("sandbox ready", detail: "\(String(format: "%.1f", elapsed))s")
+        printWatchHint(watchPlan)
 
         try guest.sendCommand(
             cmd: command[0],
@@ -448,5 +479,10 @@ struct Run: AsyncParsableCommand {
         let networkEvents = networkCollector.snapshot
         vmInstance.forceStop()
         return RunResult(exitCode: exitCode, networkEvents: networkEvents)
+    }
+
+    private static func printWatchHint(_ plan: WatchPlan) {
+        guard plan.usesPolling else { return }
+        TerminalUI.info("watch polling", detail: "file changes detected by polling for VirtioFS compatibility")
     }
 }

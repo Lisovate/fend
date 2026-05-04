@@ -155,6 +155,10 @@ memory = "2GB"
 [network]
 mode = "on"                         # on | off
 
+[watch]
+mode = "auto"                       # auto | native | polling | mirror
+poll_interval_ms = 500              # used when polling is active
+
 [audit]
 level = "strict"                     # strict | warn | off
 rebuild = true                       # run `npm rebuild` after a clean audit
@@ -170,6 +174,14 @@ Generate one with `fend init`.
 Use `mode = "off"` or `fend --network off <command>` for commands that should
 not reach the internet, such as tests or risky install-script rebuilds. The
 network mode is recorded in `fend log` for later review.
+
+`[watch]` controls file-change detection for long-running dev servers. Today
+`auto` keeps macOS on native VirtioFS notifications and switches likely Linux
+dev commands to polling for compatibility with current VirtioFS host-to-guest
+watcher limits. You can override one command with `fend --watch polling npm run
+dev` or force native behavior with `fend --watch native npm run dev`. `mirror`
+is reserved for the planned Linux mode where host source files are copied into
+a disposable guest-local workspace for better HMR behavior.
 
 Useful log filters:
 

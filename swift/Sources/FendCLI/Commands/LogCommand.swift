@@ -109,14 +109,15 @@ struct Log: ParsableCommand {
                 ? "\((e.networkMode ?? "-"))+\(networkCount)"
                 : (e.networkMode ?? "-")
             let audit = e.audit.map { "\($0.decision)(\($0.findings))" } ?? "-"
+            let watch = e.watchMode ?? "-"
             let fs = e.fsDiff.flatMap { diff in
                 guard !diff.touchedFiles.isEmpty else { return nil }
                 return "\(diff.risk ?? "unknown")(\(diff.touchedFiles.count))"
             } ?? "-"
-            return [String(ts), proj, cmd, dur, exit, net, audit, fs]
+            return [String(ts), proj, cmd, dur, exit, net, watch, audit, fs]
         }
         TerminalUI.table(
-            headers: ["Timestamp", "Project", "Cmd", "Duration", "Exit", "Net", "Audit", "FS"],
+            headers: ["Timestamp", "Project", "Cmd", "Duration", "Exit", "Net", "Watch", "Audit", "FS"],
             rows: rows
         )
     }
