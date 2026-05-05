@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 pub const DEFAULT_VSOCK_PORT: u32 = 1024;
+pub const DEFAULT_SMOKE_TIMEOUT: Duration = Duration::from_secs(30);
+const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const MESSAGE_EXECUTE_COMMAND: u8 = 1;
 const MESSAGE_OUTPUT_DATA: u8 = 3;
 const MESSAGE_EXIT_STATUS: u8 = 4;
@@ -14,6 +17,7 @@ const COMMAND_ID: u64 = 1;
 pub struct SmokeConfig {
     pub cid: u32,
     pub port: u32,
+    pub timeout: Duration,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -32,6 +36,12 @@ pub enum SmokeError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Protocol(String),
+    ConnectionTimeout {
+        cid: u32,
+        port: u32,
+        timeout: Duration,
+        last_error: String,
+    },
     UnsupportedHost,
 }
 
@@ -42,6 +52,16 @@ impl fmt::Display for SmokeError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Protocol(message) => write!(f, "{message}"),
+            Self::ConnectionTimeout {
+                cid,
+                port,
+                timeout,
+                last_error,
+            } => write!(
+                f,
+                "timed out connecting to fendd on vsock cid {cid} port {port} after {}s: {last_error}",
+                timeout.as_secs()
+            ),
             Self::UnsupportedHost => write!(f, "vsock smoke is only supported on Linux hosts"),
         }
     }
@@ -73,19 +93,57 @@ struct ExitStatus {
 }
 
 pub fn run_smoke(config: &SmokeConfig) -> Result<SmokeResult, SmokeError> {
-    let mut stream = connect_vsock(config.cid, config.port)?;
+    validate_config(config)?;
+    let mut stream = connect_vsock_with_retry(
+        config,
+        || connect_vsock(config.cid, config.port),
+        std::thread::sleep,
+    )?;
     run_smoke_session(&mut stream, config)
+}
+
+fn connect_vsock_with_retry<S>(
+    config: &SmokeConfig,
+    mut connect: impl FnMut() -> Result<S, SmokeError>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<S, SmokeError> {
+    let attempts = connection_attempts(config.timeout);
+    let mut last_error = "unknown error".to_string();
+
+    for attempt in 0..attempts {
+        match connect() {
+            Ok(stream) => return Ok(stream),
+            Err(SmokeError::UnsupportedHost) => return Err(SmokeError::UnsupportedHost),
+            Err(error) => {
+                last_error = error.to_string();
+                if attempt + 1 < attempts {
+                    sleep(RETRY_INTERVAL);
+                }
+            }
+        }
+    }
+
+    Err(SmokeError::ConnectionTimeout {
+        cid: config.cid,
+        port: config.port,
+        timeout: config.timeout,
+        last_error,
+    })
+}
+
+fn connection_attempts(timeout: Duration) -> usize {
+    let timeout_ms = timeout.as_millis();
+    let interval_ms = RETRY_INTERVAL.as_millis();
+    let attempts = timeout_ms / interval_ms + 1;
+    usize::try_from(attempts).unwrap_or(usize::MAX)
 }
 
 pub fn run_smoke_session(
     stream: &mut (impl Read + Write),
     config: &SmokeConfig,
 ) -> Result<SmokeResult, SmokeError> {
-    let Some((cmd, args)) = config.command.split_first() else {
-        return Err(SmokeError::InvalidConfig(
-            "smoke command cannot be empty".to_string(),
-        ));
-    };
+    validate_config(config)?;
+    let (cmd, args) = config.command.split_first().expect("validated command");
 
     let ready = read_frame(stream)?;
     if ready.kind != MESSAGE_READY {
@@ -193,8 +251,17 @@ fn ensure_command_id(id: u64) -> Result<(), SmokeError> {
     }
 }
 
+fn validate_config(config: &SmokeConfig) -> Result<(), SmokeError> {
+    if config.command.is_empty() {
+        return Err(SmokeError::InvalidConfig(
+            "smoke command cannot be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
-fn connect_vsock(cid: u32, port: u32) -> std::io::Result<std::fs::File> {
+fn connect_vsock(cid: u32, port: u32) -> Result<std::fs::File, SmokeError> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
     const AF_VSOCK: libc::c_int = 40;
@@ -211,7 +278,7 @@ fn connect_vsock(cid: u32, port: u32) -> std::io::Result<std::fs::File> {
 
     let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(SmokeError::Io(std::io::Error::last_os_error()));
     }
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
@@ -232,7 +299,7 @@ fn connect_vsock(cid: u32, port: u32) -> std::io::Result<std::fs::File> {
         )
     };
     if rc != 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(SmokeError::Io(std::io::Error::last_os_error()));
     }
 
     Ok(std::fs::File::from(fd))
@@ -355,6 +422,7 @@ mod tests {
         let config = SmokeConfig {
             cid: 42,
             port: DEFAULT_VSOCK_PORT,
+            timeout: DEFAULT_SMOKE_TIMEOUT,
             cwd: "/workspace".to_string(),
             env: BTreeMap::from([("FEND_NETWORK_MODE".to_string(), "off".to_string())]),
             command: vec!["/bin/echo".to_string(), "fend".to_string()],
@@ -402,6 +470,62 @@ mod tests {
     }
 
     #[test]
+    fn smoke_retries_connection_until_ready() {
+        let config = sample_config();
+        let mut input = Vec::new();
+        test_frame(&mut input, MESSAGE_READY, b"");
+        test_frame(&mut input, MESSAGE_EXIT_STATUS, br#"{"id":1,"code":0}"#);
+        let mut failures = 2;
+        let mut sleeps = Vec::new();
+
+        let mut stream = connect_vsock_with_retry(
+            &config,
+            || {
+                if failures > 0 {
+                    failures -= 1;
+                    return Err(SmokeError::Io(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionRefused,
+                        "not ready",
+                    )));
+                }
+                Ok(TestStream::new(input.clone()))
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+
+        assert_eq!(sleeps, [RETRY_INTERVAL, RETRY_INTERVAL]);
+        let result = run_smoke_session(&mut stream, &config).unwrap();
+        assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn smoke_timeout_reports_last_connection_error() {
+        let mut config = sample_config();
+        config.timeout = RETRY_INTERVAL * 2;
+        let mut attempts = 0;
+        let mut sleeps = Vec::new();
+
+        let err = connect_vsock_with_retry(
+            &config,
+            || -> Result<TestStream, SmokeError> {
+                attempts += 1;
+                Err(SmokeError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "still booting",
+                )))
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 3);
+        assert_eq!(sleeps, [RETRY_INTERVAL, RETRY_INTERVAL]);
+        assert!(err.to_string().contains("timed out connecting"));
+        assert!(err.to_string().contains("still booting"));
+    }
+
+    #[test]
     fn base64_decode_accepts_expected_payloads() {
         assert_eq!(base64_decode(""), Some(Vec::new()));
         assert_eq!(base64_decode("Zg=="), Some(b"f".to_vec()));
@@ -415,6 +539,7 @@ mod tests {
         SmokeConfig {
             cid: 42,
             port: DEFAULT_VSOCK_PORT,
+            timeout: DEFAULT_SMOKE_TIMEOUT,
             cwd: "/workspace".to_string(),
             env: BTreeMap::new(),
             command: vec!["/bin/true".to_string()],
@@ -425,6 +550,7 @@ mod tests {
         write_frame(output, kind, payload).unwrap();
     }
 
+    #[derive(Debug)]
     struct TestStream {
         input: Cursor<Vec<u8>>,
         output: Vec<u8>,

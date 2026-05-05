@@ -65,7 +65,9 @@ Phase 1 spike artifacts now live in the repo:
 - `fend-linux smoke` is the Linux host smoke client for the existing `fendd`
   frame protocol. It connects over virtio-vsock, waits for the daemon `Ready`
   frame, sends an `ExecuteCommand`, prints the captured stdout/stderr, and
-  fails if the guest command exits non-zero. The older
+  fails if the guest command exits non-zero. It retries the initial vsock
+  connection for up to 30 seconds by default, which makes it safe to run while
+  the guest is still booting. The older
   `fendd/src/bin/fend-vsock-smoke.rs` helper remains available as a low-level
   protocol reference.
 - `scripts/test-linux-spike-scripts.sh` runs host-independent shell checks with
@@ -162,14 +164,14 @@ FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
 Then, from another terminal, verify the vsock command path:
 
 ```bash
-cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke --cid 42
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke --cid 42 --timeout 60
 ```
 
 Verify command-level network isolation:
 
 ```bash
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke \
-  --cid 42 --env FEND_NETWORK_MODE=off -- /usr/bin/curl -I https://example.com
+  --cid 42 --timeout 60 --env FEND_NETWORK_MODE=off -- /usr/bin/curl -I https://example.com
 ```
 
 The expected result for the second command is a DNS/connectivity failure from

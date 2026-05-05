@@ -3,11 +3,11 @@ use std::env;
 use std::fmt;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::doctor::DoctorReport;
 use crate::qemu::{LaunchConfig, LaunchPlan, NetworkMode, RuntimeArtifacts};
-use crate::smoke::{SmokeConfig, DEFAULT_VSOCK_PORT};
+use crate::smoke::{SmokeConfig, DEFAULT_SMOKE_TIMEOUT, DEFAULT_VSOCK_PORT};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -36,6 +36,7 @@ pub struct DoctorOptions {
 pub struct SmokeOptions {
     pub cid: Option<u32>,
     pub port: Option<u32>,
+    pub timeout_secs: Option<u64>,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -46,6 +47,7 @@ impl Default for SmokeOptions {
         Self {
             cid: None,
             port: None,
+            timeout_secs: None,
             cwd: "/workspace".to_string(),
             env: BTreeMap::new(),
             command: Vec::new(),
@@ -152,7 +154,7 @@ pub fn launch_usage() -> &'static str {
 }
 
 pub fn smoke_usage() -> &'static str {
-    "usage: fend-linux smoke [options] [-- command [args...]]\n\noptions:\n  --cid n          Guest vsock CID. Default: $FEND_QEMU_CID or 42.\n  --port n         fendd command vsock port. Default: 1024.\n  --cwd path       Guest working directory. Default: /workspace.\n  --env KEY=VALUE  Extra environment variable for the smoke command.\n\nIf command is omitted, fend-linux runs: /bin/echo fend-linux-ok\n"
+    "usage: fend-linux smoke [options] [-- command [args...]]\n\noptions:\n  --cid n          Guest vsock CID. Default: $FEND_QEMU_CID or 42.\n  --port n         fendd command vsock port. Default: 1024.\n  --timeout sec    Wait for fendd to become reachable. Default: 30.\n  --cwd path       Guest working directory. Default: /workspace.\n  --env KEY=VALUE  Extra environment variable for the smoke command.\n\nIf command is omitted, fend-linux runs: /bin/echo fend-linux-ok\n"
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
@@ -281,6 +283,10 @@ pub fn build_smoke_config(options: &SmokeOptions, defaults: &PlanDefaults) -> Sm
     SmokeConfig {
         cid: options.cid.or(defaults.guest_cid).unwrap_or(42),
         port: options.port.unwrap_or(DEFAULT_VSOCK_PORT),
+        timeout: options
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_SMOKE_TIMEOUT),
         cwd: options.cwd.clone(),
         env: options.env.clone(),
         command,
@@ -386,6 +392,7 @@ fn parse_smoke(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
             "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Smoke)),
             "--cid" => options.cid = Some(value_number(&mut args, "--cid")?),
             "--port" => options.port = Some(value_number(&mut args, "--port")?),
+            "--timeout" => options.timeout_secs = Some(value_number(&mut args, "--timeout")?),
             "--cwd" => options.cwd = value(&mut args, "--cwd")?,
             "--env" => {
                 let item = value(&mut args, "--env")?;
@@ -608,6 +615,8 @@ mod tests {
             "55",
             "--port",
             "2024",
+            "--timeout",
+            "5",
             "--cwd",
             "/workspace/app",
             "--env",
@@ -623,6 +632,7 @@ mod tests {
 
         assert_eq!(options.cid, Some(55));
         assert_eq!(options.port, Some(2024));
+        assert_eq!(options.timeout_secs, Some(5));
         assert_eq!(options.cwd, "/workspace/app");
         assert_eq!(
             options.env.get("FEND_NETWORK_MODE").map(String::as_str),
@@ -731,12 +741,14 @@ mod tests {
 
         assert_eq!(config.cid, 77);
         assert_eq!(config.port, DEFAULT_VSOCK_PORT);
+        assert_eq!(config.timeout, DEFAULT_SMOKE_TIMEOUT);
         assert_eq!(config.cwd, "/workspace");
         assert_eq!(config.command, ["/bin/echo", "fend-linux-ok"]);
 
         let options = SmokeOptions {
             cid: Some(99),
             port: Some(2048),
+            timeout_secs: Some(3),
             cwd: "/tmp".to_string(),
             env: BTreeMap::from([("KEY".to_string(), "VALUE".to_string())]),
             command: vec!["/bin/true".to_string()],
@@ -745,6 +757,7 @@ mod tests {
 
         assert_eq!(config.cid, 99);
         assert_eq!(config.port, 2048);
+        assert_eq!(config.timeout, Duration::from_secs(3));
         assert_eq!(config.cwd, "/tmp");
         assert_eq!(config.env.get("KEY").map(String::as_str), Some("VALUE"));
         assert_eq!(config.command, ["/bin/true"]);
