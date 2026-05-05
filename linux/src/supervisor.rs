@@ -6,7 +6,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::qemu::LaunchPlan;
+use crate::qemu::{LaunchPlan, SharePlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessIo {
@@ -85,6 +85,14 @@ pub enum SupervisorError {
         path: PathBuf,
         timeout: Duration,
     },
+    ShareSourceMissing {
+        label: String,
+        path: PathBuf,
+    },
+    ShareSourceNotDirectory {
+        label: String,
+        path: PathBuf,
+    },
     ProcessExited {
         label: String,
         status: ProcessExit,
@@ -128,6 +136,16 @@ impl fmt::Display for SupervisorError {
                 timeout.as_secs_f64(),
                 path.display()
             ),
+            Self::ShareSourceMissing { label, path } => {
+                write!(f, "{label} share source is missing: {}", path.display())
+            }
+            Self::ShareSourceNotDirectory { label, path } => {
+                write!(
+                    f,
+                    "{label} share source is not a directory: {}",
+                    path.display()
+                )
+            }
             Self::ProcessExited { label, status } => {
                 write!(f, "{label} exited before becoming ready ({status})")
             }
@@ -327,6 +345,7 @@ fn prepare_plan_paths(plan: &LaunchPlan) -> Result<(), SupervisorError> {
     })?;
 
     for share in &plan.shares {
+        prepare_share_source(share)?;
         if let Some(parent) = share.socket.parent() {
             fs::create_dir_all(parent).map_err(|source| {
                 SupervisorError::io(
@@ -344,6 +363,44 @@ fn prepare_plan_paths(plan: &LaunchPlan) -> Result<(), SupervisorError> {
     }
 
     Ok(())
+}
+
+fn prepare_share_source(share: &SharePlan) -> Result<(), SupervisorError> {
+    if share.name == "workspace" {
+        return require_existing_directory(share.name, &share.source);
+    }
+
+    fs::create_dir_all(&share.source).map_err(|source| {
+        SupervisorError::io("create share source", Some(share.source.clone()), source)
+    })
+}
+
+fn require_existing_directory(label: &str, path: &Path) -> Result<(), SupervisorError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Err(SupervisorError::ShareSourceMissing {
+                label: label.to_string(),
+                path: path.to_path_buf(),
+            });
+        }
+        Err(source) => {
+            return Err(SupervisorError::io(
+                "inspect share source",
+                Some(path.to_path_buf()),
+                source,
+            ));
+        }
+    };
+
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(SupervisorError::ShareSourceNotDirectory {
+            label: label.to_string(),
+            path: path.to_path_buf(),
+        })
+    }
 }
 
 fn wait_for_socket<C: ManagedChild>(
@@ -457,6 +514,8 @@ mod tests {
             assert_eq!(vm.qemu_id(), Some(4));
             assert_eq!(vm.virtiofsd_count(), 3);
             assert!(path_is_socket(&plan.shares[0].socket));
+            assert!(plan.shares[1].source.is_dir());
+            assert!(plan.shares[2].source.is_dir());
             assert!(plan.log_dir.is_dir());
         }
 
@@ -479,6 +538,49 @@ mod tests {
         assert!(state.children.iter().all(|child| child.borrow().killed));
         assert!(state.children.iter().all(|child| child.borrow().waited));
         assert!(!plan.shares[0].socket.exists());
+    }
+
+    #[test]
+    fn launch_plan_rejects_missing_workspace_before_spawning() {
+        let temp = TestDir::new("missing-workspace");
+        let plan = sample_plan(temp.path());
+        fs::remove_dir_all(&plan.shares[0].source).unwrap();
+        let spawner = FakeSpawner::new().with_socket_creation(true);
+        let state = spawner.state.clone();
+        let mut supervisor = Supervisor::with_spawner(spawner, fast_options());
+
+        let error = supervisor.launch_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupervisorError::ShareSourceMissing {
+                ref label,
+                ref path
+            } if label == "workspace" && path == &plan.shares[0].source
+        ));
+        assert!(state.borrow().calls.is_empty());
+    }
+
+    #[test]
+    fn launch_plan_rejects_workspace_file_before_spawning() {
+        let temp = TestDir::new("workspace-file");
+        let plan = sample_plan(temp.path());
+        fs::remove_dir_all(&plan.shares[0].source).unwrap();
+        fs::write(&plan.shares[0].source, b"not a directory").unwrap();
+        let spawner = FakeSpawner::new().with_socket_creation(true);
+        let state = spawner.state.clone();
+        let mut supervisor = Supervisor::with_spawner(spawner, fast_options());
+
+        let error = supervisor.launch_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            error,
+            SupervisorError::ShareSourceNotDirectory {
+                ref label,
+                ref path
+            } if label == "workspace" && path == &plan.shares[0].source
+        ));
+        assert!(state.borrow().calls.is_empty());
     }
 
     #[test]
@@ -575,6 +677,7 @@ mod tests {
     }
 
     fn sample_plan(root: &Path) -> LaunchPlan {
+        fs::create_dir_all(root.join("workspace")).unwrap();
         let mut config = LaunchConfig::new(
             RuntimeArtifacts::from_runtime_dir(root.join("runtime")),
             root.join("workspace"),

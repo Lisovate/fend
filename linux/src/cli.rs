@@ -7,7 +7,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::doctor::DoctorReport;
 use crate::qemu::{LaunchConfig, LaunchPlan, NetworkMode, RuntimeArtifacts};
-use crate::smoke::{SmokeConfig, DEFAULT_SMOKE_TIMEOUT, DEFAULT_VSOCK_PORT};
+use crate::smoke::{
+    SmokeConfig, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_SMOKE_TIMEOUT, DEFAULT_VSOCK_PORT,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -198,7 +200,7 @@ pub fn plan_defaults_from_env() -> Result<PlanDefaults, CliError> {
     })
 }
 
-pub fn default_runtime_dir(defaults: &PlanDefaults) -> PathBuf {
+fn default_runtime_dir(defaults: &PlanDefaults) -> PathBuf {
     defaults.fend_home.join("runtime/linux-x86_64")
 }
 
@@ -287,6 +289,7 @@ pub fn build_smoke_config(options: &SmokeOptions, defaults: &PlanDefaults) -> Sm
             .timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_SMOKE_TIMEOUT),
+        max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         cwd: options.cwd.clone(),
         env: options.env.clone(),
         command,
@@ -349,7 +352,7 @@ pub fn render_launch_plan(plan: &LaunchPlan) -> String {
     output
 }
 
-pub fn shell_command(program: &str, args: &[String]) -> String {
+fn shell_command(program: &str, args: &[String]) -> String {
     std::iter::once(shell_quote(program))
         .chain(args.iter().map(|arg| shell_quote(arg)))
         .collect::<Vec<_>>()
@@ -742,6 +745,7 @@ mod tests {
         assert_eq!(config.cid, 77);
         assert_eq!(config.port, DEFAULT_VSOCK_PORT);
         assert_eq!(config.timeout, DEFAULT_SMOKE_TIMEOUT);
+        assert_eq!(config.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
         assert_eq!(config.cwd, "/workspace");
         assert_eq!(config.command, ["/bin/echo", "fend-linux-ok"]);
 

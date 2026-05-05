@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const DEFAULT_VSOCK_PORT: u32 = 1024;
 pub const DEFAULT_SMOKE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const MESSAGE_EXECUTE_COMMAND: u8 = 1;
 const MESSAGE_OUTPUT_DATA: u8 = 3;
@@ -18,6 +19,7 @@ pub struct SmokeConfig {
     pub cid: u32,
     pub port: u32,
     pub timeout: Duration,
+    pub max_output_bytes: usize,
     pub cwd: String,
     pub env: BTreeMap<String, String>,
     pub command: Vec<String>,
@@ -36,6 +38,13 @@ pub enum SmokeError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Protocol(String),
+    SessionTimeout {
+        timeout: Duration,
+    },
+    OutputLimitExceeded {
+        stream: &'static str,
+        limit: usize,
+    },
     ConnectionTimeout {
         cid: u32,
         port: u32,
@@ -52,6 +61,13 @@ impl fmt::Display for SmokeError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Json(error) => write!(f, "{error}"),
             Self::Protocol(message) => write!(f, "{message}"),
+            Self::SessionTimeout { timeout } => {
+                write!(f, "timed out waiting for smoke command after {}s", timeout.as_secs())
+            }
+            Self::OutputLimitExceeded { stream, limit } => write!(
+                f,
+                "guest {stream} exceeded smoke output limit of {limit} bytes"
+            ),
             Self::ConnectionTimeout {
                 cid,
                 port,
@@ -92,6 +108,104 @@ struct ExitStatus {
     code: i32,
 }
 
+trait SmokeStream: Read + Write {
+    fn set_io_timeout(&mut self, timeout: Duration) -> Result<(), SmokeError>;
+}
+
+#[cfg(test)]
+struct PlainSmokeStream<'a, S: Read + Write + ?Sized> {
+    inner: &'a mut S,
+}
+
+#[cfg(test)]
+impl<S: Read + Write + ?Sized> Read for PlainSmokeStream<'_, S> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+#[cfg(test)]
+impl<S: Read + Write + ?Sized> Write for PlainSmokeStream<'_, S> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+impl<S: Read + Write + ?Sized> SmokeStream for PlainSmokeStream<'_, S> {
+    fn set_io_timeout(&mut self, _timeout: Duration) -> Result<(), SmokeError> {
+        Ok(())
+    }
+}
+
+struct VsockStream {
+    #[cfg(target_os = "linux")]
+    file: std::fs::File,
+}
+
+impl Read for VsockStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.file.read(buf)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buf;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "vsock is only supported on Linux",
+            ))
+        }
+    }
+}
+
+impl Write for VsockStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            self.file.write(buf)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = buf;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "vsock is only supported on Linux",
+            ))
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.file.flush()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+}
+
+impl SmokeStream for VsockStream {
+    fn set_io_timeout(&mut self, timeout: Duration) -> Result<(), SmokeError> {
+        #[cfg(target_os = "linux")]
+        {
+            set_socket_timeout(&self.file, timeout)?;
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = timeout;
+        }
+        Ok(())
+    }
+}
+
 pub fn run_smoke(config: &SmokeConfig) -> Result<SmokeResult, SmokeError> {
     validate_config(config)?;
     let mut stream = connect_vsock_with_retry(
@@ -99,7 +213,7 @@ pub fn run_smoke(config: &SmokeConfig) -> Result<SmokeResult, SmokeError> {
         || connect_vsock(config.cid, config.port),
         std::thread::sleep,
     )?;
-    run_smoke_session(&mut stream, config)
+    run_smoke_session_inner(&mut stream, config)
 }
 
 fn connect_vsock_with_retry<S>(
@@ -138,14 +252,24 @@ fn connection_attempts(timeout: Duration) -> usize {
     usize::try_from(attempts).unwrap_or(usize::MAX)
 }
 
-pub fn run_smoke_session(
+#[cfg(test)]
+fn run_smoke_session(
     stream: &mut (impl Read + Write),
     config: &SmokeConfig,
 ) -> Result<SmokeResult, SmokeError> {
+    let mut stream = PlainSmokeStream { inner: stream };
+    run_smoke_session_inner(&mut stream, config)
+}
+
+fn run_smoke_session_inner(
+    stream: &mut impl SmokeStream,
+    config: &SmokeConfig,
+) -> Result<SmokeResult, SmokeError> {
     validate_config(config)?;
+    let deadline = SmokeDeadline::new(config.timeout);
     let (cmd, args) = config.command.split_first().expect("validated command");
 
-    let ready = read_frame(stream)?;
+    let ready = read_frame_with_deadline(stream, &deadline)?;
     if ready.kind != MESSAGE_READY {
         return Err(SmokeError::Protocol(format!(
             "expected Ready frame, got type {}",
@@ -161,12 +285,12 @@ pub fn run_smoke_session(
         "cwd": &config.cwd,
         "tty": false,
     }))?;
-    write_frame(stream, MESSAGE_EXECUTE_COMMAND, &payload)?;
+    write_frame_with_deadline(stream, MESSAGE_EXECUTE_COMMAND, &payload, &deadline)?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     loop {
-        let frame = read_frame(stream)?;
+        let frame = read_frame_with_deadline(stream, &deadline)?;
         match frame.kind {
             MESSAGE_OUTPUT_DATA => {
                 let output = parse_output_data(&frame.payload)?;
@@ -174,8 +298,12 @@ pub fn run_smoke_session(
                 let bytes = base64_decode(&output.data)
                     .ok_or_else(|| SmokeError::Protocol("guest sent invalid base64".to_string()))?;
                 match output.stream.as_str() {
-                    "stdout" => stdout.extend(bytes),
-                    "stderr" => stderr.extend(bytes),
+                    "stdout" => {
+                        append_output(&mut stdout, bytes, "stdout", config.max_output_bytes)?
+                    }
+                    "stderr" => {
+                        append_output(&mut stderr, bytes, "stderr", config.max_output_bytes)?
+                    }
                     other => {
                         return Err(SmokeError::Protocol(format!(
                             "unknown output stream {other:?}"
@@ -199,6 +327,72 @@ pub fn run_smoke_session(
             }
         }
     }
+}
+
+#[derive(Debug)]
+struct SmokeDeadline {
+    started_at: Instant,
+    timeout: Duration,
+}
+
+impl SmokeDeadline {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            started_at: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn remaining(&self) -> Result<Duration, SmokeError> {
+        self.timeout
+            .checked_sub(self.started_at.elapsed())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or(SmokeError::SessionTimeout {
+                timeout: self.timeout,
+            })
+    }
+}
+
+fn read_frame_with_deadline(
+    stream: &mut impl SmokeStream,
+    deadline: &SmokeDeadline,
+) -> Result<Frame, SmokeError> {
+    let timeout = deadline.remaining()?;
+    stream.set_io_timeout(timeout)?;
+    read_frame(stream).map_err(|error| io_or_timeout(error, deadline.timeout))
+}
+
+fn write_frame_with_deadline(
+    stream: &mut impl SmokeStream,
+    kind: u8,
+    payload: &[u8],
+    deadline: &SmokeDeadline,
+) -> Result<(), SmokeError> {
+    let timeout = deadline.remaining()?;
+    stream.set_io_timeout(timeout)?;
+    write_frame(stream, kind, payload).map_err(|error| io_or_timeout(error, deadline.timeout))
+}
+
+fn io_or_timeout(error: std::io::Error, timeout: Duration) -> SmokeError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            SmokeError::SessionTimeout { timeout }
+        }
+        _ => SmokeError::Io(error),
+    }
+}
+
+fn append_output(
+    buffer: &mut Vec<u8>,
+    bytes: Vec<u8>,
+    stream: &'static str,
+    limit: usize,
+) -> Result<(), SmokeError> {
+    if buffer.len().saturating_add(bytes.len()) > limit {
+        return Err(SmokeError::OutputLimitExceeded { stream, limit });
+    }
+    buffer.extend(bytes);
+    Ok(())
 }
 
 fn parse_output_data(payload: &[u8]) -> Result<OutputData, SmokeError> {
@@ -257,57 +451,102 @@ fn validate_config(config: &SmokeConfig) -> Result<(), SmokeError> {
             "smoke command cannot be empty".to_string(),
         ));
     }
+    if config.timeout.is_zero() {
+        return Err(SmokeError::InvalidConfig(
+            "smoke timeout must be greater than 0".to_string(),
+        ));
+    }
+    if config.max_output_bytes == 0 {
+        return Err(SmokeError::InvalidConfig(
+            "smoke output limit must be greater than 0".to_string(),
+        ));
+    }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn connect_vsock(cid: u32, port: u32) -> Result<std::fs::File, SmokeError> {
+fn connect_vsock(cid: u32, port: u32) -> Result<VsockStream, SmokeError> {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-    const AF_VSOCK: libc::c_int = 40;
-
-    #[repr(C)]
-    struct SockaddrVm {
-        svm_family: libc::sa_family_t,
-        svm_reserved1: u16,
-        svm_port: u32,
-        svm_cid: u32,
-        svm_flags: u8,
-        svm_zero: [u8; 3],
-    }
-
-    let fd = unsafe { libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    // SAFETY: socket() is called with a supported address family and returns either
+    // a fresh owned fd or -1 with errno set.
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
     if fd < 0 {
         return Err(SmokeError::Io(std::io::Error::last_os_error()));
     }
+    // SAFETY: fd was just returned by socket(), is non-negative, and ownership has
+    // not been transferred elsewhere.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
 
-    let addr = SockaddrVm {
-        svm_family: AF_VSOCK as libc::sa_family_t,
+    let addr = libc::sockaddr_vm {
+        svm_family: libc::AF_VSOCK as libc::sa_family_t,
         svm_reserved1: 0,
         svm_port: port,
         svm_cid: cid,
-        svm_flags: 0,
-        svm_zero: [0; 3],
+        svm_zero: [0; 4],
     };
 
+    // SAFETY: addr points to a valid sockaddr_vm value for the duration of the
+    // call, and fd remains owned by OwnedFd.
     let rc = unsafe {
         libc::connect(
             fd.as_raw_fd(),
-            &addr as *const SockaddrVm as *const libc::sockaddr,
-            std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+            &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
         )
     };
     if rc != 0 {
         return Err(SmokeError::Io(std::io::Error::last_os_error()));
     }
 
-    Ok(std::fs::File::from(fd))
+    Ok(VsockStream {
+        file: std::fs::File::from(fd),
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn connect_vsock(_cid: u32, _port: u32) -> Result<std::fs::File, SmokeError> {
+fn connect_vsock(_cid: u32, _port: u32) -> Result<VsockStream, SmokeError> {
     Err(SmokeError::UnsupportedHost)
+}
+
+#[cfg(target_os = "linux")]
+fn set_socket_timeout(file: &std::fs::File, timeout: Duration) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let timeval = duration_to_timeval(timeout);
+    for option in [libc::SO_RCVTIMEO, libc::SO_SNDTIMEO] {
+        // SAFETY: timeval points to a valid libc::timeval for the duration of the
+        // call, and file.as_raw_fd() borrows a live socket fd.
+        let rc = unsafe {
+            libc::setsockopt(
+                file.as_raw_fd(),
+                libc::SOL_SOCKET,
+                option,
+                &timeval as *const libc::timeval as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn duration_to_timeval(timeout: Duration) -> libc::timeval {
+    let micros = timeout.as_micros().max(1);
+    let seconds = (micros / 1_000_000).min(libc::time_t::MAX as u128);
+    let useconds = if seconds == libc::time_t::MAX as u128 {
+        999_999
+    } else {
+        micros % 1_000_000
+    };
+
+    libc::timeval {
+        tv_sec: seconds as libc::time_t,
+        tv_usec: useconds as libc::suseconds_t,
+    }
 }
 
 struct Frame {
@@ -423,6 +662,7 @@ mod tests {
             cid: 42,
             port: DEFAULT_VSOCK_PORT,
             timeout: DEFAULT_SMOKE_TIMEOUT,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             cwd: "/workspace".to_string(),
             env: BTreeMap::from([("FEND_NETWORK_MODE".to_string(), "off".to_string())]),
             command: vec!["/bin/echo".to_string(), "fend".to_string()],
@@ -467,6 +707,62 @@ mod tests {
         let err = run_smoke_session(&mut stream, &config).unwrap_err();
 
         assert!(err.to_string().contains("unexpected command id 2"));
+    }
+
+    #[test]
+    fn smoke_session_limits_captured_output() {
+        let mut input = Vec::new();
+        test_frame(&mut input, MESSAGE_READY, b"");
+        test_frame(
+            &mut input,
+            MESSAGE_OUTPUT_DATA,
+            br#"{"id":1,"stream":"stdout","data":"ZmVuZAo="}"#,
+        );
+        let mut stream = TestStream::new(input);
+        let mut config = sample_config();
+        config.max_output_bytes = 2;
+
+        let err = run_smoke_session(&mut stream, &config).unwrap_err();
+
+        assert!(matches!(
+            err,
+            SmokeError::OutputLimitExceeded {
+                stream: "stdout",
+                limit: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn smoke_session_maps_io_timeout_to_session_timeout() {
+        let mut stream = WouldBlockStream::default();
+        let config = sample_config();
+
+        let err = run_smoke_session_inner(&mut stream, &config).unwrap_err();
+
+        assert!(matches!(err, SmokeError::SessionTimeout { .. }));
+        assert_eq!(stream.timeouts.len(), 1);
+        assert!(stream.timeouts[0] > Duration::ZERO);
+        assert!(stream.timeouts[0] <= DEFAULT_SMOKE_TIMEOUT);
+    }
+
+    #[test]
+    fn smoke_session_rejects_unbounded_config() {
+        let mut stream = TestStream::new(Vec::new());
+        let mut config = sample_config();
+        config.timeout = Duration::ZERO;
+
+        let err = run_smoke_session(&mut stream, &config).unwrap_err();
+
+        assert!(err.to_string().contains("timeout must be greater than 0"));
+
+        let mut config = sample_config();
+        config.max_output_bytes = 0;
+        let err = run_smoke_session(&mut stream, &config).unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("output limit must be greater than 0"));
     }
 
     #[test]
@@ -540,6 +836,7 @@ mod tests {
             cid: 42,
             port: DEFAULT_VSOCK_PORT,
             timeout: DEFAULT_SMOKE_TIMEOUT,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             cwd: "/workspace".to_string(),
             env: BTreeMap::new(),
             command: vec!["/bin/true".to_string()],
@@ -578,6 +875,37 @@ mod tests {
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct WouldBlockStream {
+        timeouts: Vec<Duration>,
+    }
+
+    impl Read for WouldBlockStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "timed out",
+            ))
+        }
+    }
+
+    impl Write for WouldBlockStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SmokeStream for WouldBlockStream {
+        fn set_io_timeout(&mut self, timeout: Duration) -> Result<(), SmokeError> {
+            self.timeouts.push(timeout);
             Ok(())
         }
     }

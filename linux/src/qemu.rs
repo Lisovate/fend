@@ -215,6 +215,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
             "file={},if=virtio,format=raw,cache=writeback",
             config.artifacts.rootfs.display()
         ),
+        "-snapshot".to_string(),
         "-device".to_string(),
         format!(
             "vhost-vsock-pci,id=fend-vsock,guest-cid={}",
@@ -254,7 +255,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
     })
 }
 
-pub fn kernel_cmdline(epoch: i64, guest_workspace: &str) -> String {
+fn kernel_cmdline(epoch: i64, guest_workspace: &str) -> String {
     format!(
         "console=ttyS0 root=/dev/vda rootwait rw init=/usr/local/bin/fendd quiet fend.epoch={epoch} fend.cwd={}",
         base64(guest_workspace.as_bytes())
@@ -295,7 +296,7 @@ fn share(
 
 fn base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;
@@ -380,6 +381,7 @@ mod tests {
                 &plan.kernel_cmdline,
                 "-drive",
                 "file=/home/pawel/.fend/runtime/linux-x86_64/rootfs.img,if=virtio,format=raw,cache=writeback",
+                "-snapshot",
                 "-device",
                 "vhost-vsock-pci,id=fend-vsock,guest-cid=42",
                 "-chardev",

@@ -107,6 +107,10 @@ run_ok "prepare-help" \
 run_ok "qemu-help" \
     "${PROJECT_ROOT}/scripts/linux-qemu-spike.sh" --help
 
+grep -q -- "-snapshot" "${PROJECT_ROOT}/scripts/linux-qemu-spike.sh" \
+    || fail "qemu-snapshot-flag: expected disposable rootfs writes"
+log "qemu-snapshot-flag"
+
 run_ok "prepare-check" \
     env "${COMMON_ENV[@]}" "FENDD_BIN=${FENDD_BIN}" \
     "${PROJECT_ROOT}/scripts/prepare-linux-x86_64-runtime.sh" --check

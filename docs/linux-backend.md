@@ -61,13 +61,15 @@ Phase 1 spike artifacts now live in the repo:
 - `scripts/linux-qemu-spike.sh` validates the Linux host prerequisites and
   launches the expected QEMU/KVM shape: direct kernel boot, virtio block
   rootfs, three VirtioFS shares (`workspace`, `cache`, `tools`), virtio-vsock,
-  and rootless networking through `passt` by default.
+  disposable rootfs writes, and rootless networking through `passt` by default.
 - `fend-linux smoke` is the Linux host smoke client for the existing `fendd`
   frame protocol. It connects over virtio-vsock, waits for the daemon `Ready`
   frame, sends an `ExecuteCommand`, prints the captured stdout/stderr, and
   fails if the guest command exits non-zero. It retries the initial vsock
   connection for up to 30 seconds by default, which makes it safe to run while
-  the guest is still booting. The older
+  the guest is still booting. The same timeout also bounds the command session,
+  and captured stdout/stderr are capped so a broken guest cannot hang the host
+  CLI indefinitely or grow host memory without limit. The older
   `fendd/src/bin/fend-vsock-smoke.rs` helper remains available as a low-level
   protocol reference.
 - `scripts/test-linux-spike-scripts.sh` runs host-independent shell checks with
@@ -135,7 +137,10 @@ scripts/prepare-linux-x86_64-runtime.sh --check
 
 `fend-linux launch` also runs a launch-specific preflight automatically before
 it creates `virtiofsd` sockets or starts QEMU. Use `--network user` or
-`--network off` when validating hosts without `passt`.
+`--network off` when validating hosts without `passt`. The Rust supervisor
+requires the workspace share to exist, creates cache/tool share directories when
+needed, and launches QEMU with snapshot disk writes so the reusable rootfs image
+stays disposable across smoke runs.
 
 After the builder places x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
 `~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch through

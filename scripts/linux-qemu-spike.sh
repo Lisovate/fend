@@ -257,6 +257,7 @@ qemu-system-x86_64 \
     -initrd "${INITRD_PATH}" \
     -append "console=ttyS0 root=/dev/vda rootwait rw init=/usr/local/bin/fendd quiet fend.epoch=${EPOCH} fend.cwd=${GUEST_WORKSPACE_B64}" \
     -drive "file=${ROOTFS_PATH},if=virtio,format=raw,cache=writeback" \
+    -snapshot \
     -device "vhost-vsock-pci,id=fend-vsock,guest-cid=${GUEST_CID}" \
     -chardev "socket,id=char-workspace,path=${WORKSPACE_SOCKET}" \
     -device "vhost-user-fs-pci,chardev=char-workspace,tag=workspace" \

@@ -158,6 +158,11 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
 
     if !probe.vhost_vsock.exists {
         issues.push("/dev/vhost-vsock is missing. Try: sudo modprobe vhost_vsock.".to_string());
+    } else if !probe.vhost_vsock.readable || !probe.vhost_vsock.writable {
+        issues.push(
+            "Current user cannot access /dev/vhost-vsock. Check device permissions or group membership."
+                .to_string(),
+        );
     }
 
     if artifacts_missing {
@@ -477,6 +482,28 @@ mod tests {
             "/dev/kvm is missing. Enable virtualization and load the KVM module.",
         );
         assert_eq!(field(&report, "/dev/kvm"), Some("missing"));
+    }
+
+    #[test]
+    fn vhost_vsock_permission_denied_is_a_launch_issue() {
+        let mut probe = linux_probe();
+        probe.vhost_vsock = DeviceStatus {
+            path: PathBuf::from("/dev/vhost-vsock"),
+            exists: true,
+            readable: false,
+            writable: false,
+        };
+
+        let report = evaluate_launch(&probe, NetworkMode::Off);
+
+        assert_contains(
+            &report.issues,
+            "Current user cannot access /dev/vhost-vsock. Check device permissions or group membership.",
+        );
+        assert_eq!(
+            field(&report, "/dev/vhost-vsock"),
+            Some("permission denied")
+        );
     }
 
     fn linux_probe() -> HostProbe {
