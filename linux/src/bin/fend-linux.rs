@@ -1,12 +1,15 @@
+use std::io::Write as _;
 use std::process::ExitCode;
 
 use fend_linux::cli::{
     build_launch_config, build_supervised_launch_config, doctor_usage, launch_usage, parse_args,
     plan_defaults_from_env, plan_usage, render_doctor_report, render_launch_plan,
-    resolve_doctor_runtime_dir, resolve_plan_runtime_dir, usage, CliCommand, HelpTopic,
+    resolve_doctor_runtime_dir, resolve_plan_runtime_dir, smoke_usage, usage, CliCommand,
+    HelpTopic,
 };
 use fend_linux::doctor;
 use fend_linux::qemu;
+use fend_linux::smoke;
 use fend_linux::supervisor::{Supervisor, SupervisorOptions};
 
 fn main() -> ExitCode {
@@ -32,6 +35,7 @@ fn run() -> Result<ExitCode, String> {
                     HelpTopic::Doctor => doctor_usage(),
                     HelpTopic::Plan => plan_usage(),
                     HelpTopic::Launch => launch_usage(),
+                    HelpTopic::Smoke => smoke_usage(),
                 }
             );
             Ok(ExitCode::SUCCESS)
@@ -73,6 +77,24 @@ fn run() -> Result<ExitCode, String> {
             if status.code == Some(0) {
                 Ok(ExitCode::SUCCESS)
             } else {
+                Ok(ExitCode::FAILURE)
+            }
+        }
+        CliCommand::Smoke(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let config = fend_linux::cli::build_smoke_config(&options, &defaults);
+            let result = smoke::run_smoke(&config).map_err(|error| error.to_string())?;
+            std::io::stdout()
+                .write_all(&result.stdout)
+                .map_err(|error| error.to_string())?;
+            std::io::stderr()
+                .write_all(&result.stderr)
+                .map_err(|error| error.to_string())?;
+            if result.exit_code == 0 {
+                eprintln!("ok    vsock smoke passed");
+                Ok(ExitCode::SUCCESS)
+            } else {
+                eprintln!("fail  vsock smoke exited {}", result.exit_code);
                 Ok(ExitCode::FAILURE)
             }
         }

@@ -260,7 +260,7 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 - **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
 - **Next:** macOS Intel.
 - **Then:** Linux via KVM/QEMU first, with a smaller custom backend evaluated later. See [`docs/linux-backend.md`](./docs/linux-backend.md).
-- **Linux spike:** Linux host work lives separately in Rust under `linux/`; `fend-linux` can render doctor output, inspect launch plans, and run launch-time preflight before supervising QEMU/`virtiofsd`; `scripts/prepare-linux-x86_64-runtime.sh` builds the x86_64 runtime artifacts, `scripts/linux-qemu-spike.sh` captures the manual QEMU/KVM launch shape, `scripts/test-linux-spike-scripts.sh` covers host-independent checks, and `fend-vsock-smoke` verifies the host-to-`fendd` vsock command path.
+- **Linux spike:** Linux host work lives separately in Rust under `linux/`; `fend-linux` can render doctor output, inspect launch plans, run launch-time preflight before supervising QEMU/`virtiofsd`, and verify host-to-`fendd` command execution with `fend-linux smoke`; `scripts/prepare-linux-x86_64-runtime.sh` builds the x86_64 runtime artifacts, `scripts/linux-qemu-spike.sh` captures the manual QEMU/KVM launch shape, and `scripts/test-linux-spike-scripts.sh` covers host-independent checks.
 - **Future:** Windows (WSL2), AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
 
 Issues, bug reports, and PRs welcome.

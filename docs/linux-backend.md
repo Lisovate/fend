@@ -62,9 +62,12 @@ Phase 1 spike artifacts now live in the repo:
   launches the expected QEMU/KVM shape: direct kernel boot, virtio block
   rootfs, three VirtioFS shares (`workspace`, `cache`, `tools`), virtio-vsock,
   and rootless networking through `passt` by default.
-- `fendd/src/bin/fend-vsock-smoke.rs` is a gated Linux host smoke client for
-  the existing fendd frame protocol. Build it with
-  `cargo run --features host-tools --bin fend-vsock-smoke -- ...`.
+- `fend-linux smoke` is the Linux host smoke client for the existing `fendd`
+  frame protocol. It connects over virtio-vsock, waits for the daemon `Ready`
+  frame, sends an `ExecuteCommand`, prints the captured stdout/stderr, and
+  fails if the guest command exits non-zero. The older
+  `fendd/src/bin/fend-vsock-smoke.rs` helper remains available as a low-level
+  protocol reference.
 - `scripts/test-linux-spike-scripts.sh` runs host-independent shell checks with
   mocked Linux/KVM tools. It validates argument parsing, preflight checks,
   runtime artifact detection, and failure messages without booting QEMU.
@@ -114,6 +117,7 @@ bash -n scripts/linux-qemu-spike.sh
 scripts/test-linux-spike-scripts.sh
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /tmp/project
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- launch --help
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke --help
 cargo test --manifest-path fendd/Cargo.toml
 cargo test --manifest-path linux/Cargo.toml
 swift test --package-path swift
@@ -158,16 +162,13 @@ FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
 Then, from another terminal, verify the vsock command path:
 
 ```bash
-cd fendd
-cargo run --features host-tools --bin fend-vsock-smoke -- \
-  --cid 42 -- /bin/echo fend-linux-ok
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke --cid 42
 ```
 
 Verify command-level network isolation:
 
 ```bash
-cd fendd
-cargo run --features host-tools --bin fend-vsock-smoke -- \
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- smoke \
   --cid 42 --env FEND_NETWORK_MODE=off -- /usr/bin/curl -I https://example.com
 ```
 

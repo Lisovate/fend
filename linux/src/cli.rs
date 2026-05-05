@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::env;
 use std::fmt;
 use std::fmt::Write as _;
@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::doctor::DoctorReport;
 use crate::qemu::{LaunchConfig, LaunchPlan, NetworkMode, RuntimeArtifacts};
+use crate::smoke::{SmokeConfig, DEFAULT_VSOCK_PORT};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -14,6 +15,7 @@ pub enum CliCommand {
     Doctor(DoctorOptions),
     Plan(PlanOptions),
     Launch(PlanOptions),
+    Smoke(SmokeOptions),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,11 +24,33 @@ pub enum HelpTopic {
     Doctor,
     Plan,
     Launch,
+    Smoke,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DoctorOptions {
     pub runtime_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SmokeOptions {
+    pub cid: Option<u32>,
+    pub port: Option<u32>,
+    pub cwd: String,
+    pub env: BTreeMap<String, String>,
+    pub command: Vec<String>,
+}
+
+impl Default for SmokeOptions {
+    fn default() -> Self {
+        Self {
+            cid: None,
+            port: None,
+            cwd: "/workspace".to_string(),
+            env: BTreeMap::new(),
+            command: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +108,7 @@ pub enum CliError {
     UnknownOption(String),
     MissingValue(&'static str),
     UnexpectedArgument(String),
+    InvalidEnv(String),
     InvalidNetwork(String),
     InvalidNumber { option: &'static str, value: String },
     HelpRequested(HelpTopic),
@@ -96,6 +121,7 @@ impl fmt::Display for CliError {
             Self::UnknownOption(option) => write!(f, "unknown option: {option}"),
             Self::MissingValue(option) => write!(f, "missing value for {option}"),
             Self::UnexpectedArgument(argument) => write!(f, "unexpected argument: {argument}"),
+            Self::InvalidEnv(value) => write!(f, "invalid env value {value:?}; use KEY=VALUE"),
             Self::InvalidNetwork(value) => {
                 write!(f, "invalid network mode {value:?}; use passt, user, or off")
             }
@@ -110,7 +136,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 pub fn usage() -> &'static str {
-    "usage: fend-linux <command> [options]\n\ncommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n\ncommon options:\n  -h, --help\n\nrun 'fend-linux doctor --help', 'fend-linux plan --help', or 'fend-linux launch --help' for command options.\n"
+    "usage: fend-linux <command> [options]\n\ncommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nrun 'fend-linux <command> --help' for command options.\n"
 }
 
 pub fn doctor_usage() -> &'static str {
@@ -123,6 +149,10 @@ pub fn plan_usage() -> &'static str {
 
 pub fn launch_usage() -> &'static str {
     "usage: fend-linux launch [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+}
+
+pub fn smoke_usage() -> &'static str {
+    "usage: fend-linux smoke [options] [-- command [args...]]\n\noptions:\n  --cid n          Guest vsock CID. Default: $FEND_QEMU_CID or 42.\n  --port n         fendd command vsock port. Default: 1024.\n  --cwd path       Guest working directory. Default: /workspace.\n  --env KEY=VALUE  Extra environment variable for the smoke command.\n\nIf command is omitted, fend-linux runs: /bin/echo fend-linux-ok\n"
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
@@ -140,6 +170,7 @@ where
         "doctor" => parse_doctor(args),
         "plan" => parse_plan(args),
         "launch" => parse_launch(args),
+        "smoke" => parse_smoke(args),
         other => Err(CliError::UnknownCommand(other.to_string())),
     }
 }
@@ -240,6 +271,22 @@ pub fn build_supervised_launch_config(
     config
 }
 
+pub fn build_smoke_config(options: &SmokeOptions, defaults: &PlanDefaults) -> SmokeConfig {
+    let command = if options.command.is_empty() {
+        vec!["/bin/echo".to_string(), "fend-linux-ok".to_string()]
+    } else {
+        options.command.clone()
+    };
+
+    SmokeConfig {
+        cid: options.cid.or(defaults.guest_cid).unwrap_or(42),
+        port: options.port.unwrap_or(DEFAULT_VSOCK_PORT),
+        cwd: options.cwd.clone(),
+        env: options.env.clone(),
+        command,
+    }
+}
+
 pub fn render_doctor_report(report: &DoctorReport) -> String {
     let mut output = String::new();
     let width = report
@@ -330,6 +377,39 @@ fn parse_launch(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
         Err(CliError::HelpRequested(topic)) => Ok(CliCommand::Help(topic)),
         Err(error) => Err(error),
     }
+}
+
+fn parse_smoke(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
+    let mut options = SmokeOptions::default();
+    while let Some(arg) = args.pop_front() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Smoke)),
+            "--cid" => options.cid = Some(value_number(&mut args, "--cid")?),
+            "--port" => options.port = Some(value_number(&mut args, "--port")?),
+            "--cwd" => options.cwd = value(&mut args, "--cwd")?,
+            "--env" => {
+                let item = value(&mut args, "--env")?;
+                let (key, value) = item
+                    .split_once('=')
+                    .ok_or_else(|| CliError::InvalidEnv(item.clone()))?;
+                if key.is_empty() {
+                    return Err(CliError::InvalidEnv(item));
+                }
+                options.env.insert(key.to_string(), value.to_string());
+            }
+            "--" => {
+                options.command.extend(args);
+                break;
+            }
+            other if other.starts_with('-') => return Err(CliError::UnknownOption(arg)),
+            _ => {
+                options.command.push(arg);
+                options.command.extend(args);
+                break;
+            }
+        }
+    }
+    Ok(CliCommand::Smoke(options))
 }
 
 fn parse_plan_options(
@@ -516,6 +596,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_smoke_with_options_and_command_separator() {
+        assert_eq!(
+            parse_args(["smoke", "--help"]).unwrap(),
+            CliCommand::Help(HelpTopic::Smoke)
+        );
+
+        let command = parse_args([
+            "smoke",
+            "--cid",
+            "55",
+            "--port",
+            "2024",
+            "--cwd",
+            "/workspace/app",
+            "--env",
+            "FEND_NETWORK_MODE=off",
+            "--",
+            "/bin/echo",
+            "ok",
+        ])
+        .unwrap();
+        let CliCommand::Smoke(options) = command else {
+            panic!("expected smoke command");
+        };
+
+        assert_eq!(options.cid, Some(55));
+        assert_eq!(options.port, Some(2024));
+        assert_eq!(options.cwd, "/workspace/app");
+        assert_eq!(
+            options.env.get("FEND_NETWORK_MODE").map(String::as_str),
+            Some("off")
+        );
+        assert_eq!(options.command, ["/bin/echo", "ok"]);
+    }
+
+    #[test]
     fn rejects_invalid_cli_values() {
         assert_eq!(
             parse_args(["plan", "--network", "bridge"]).unwrap_err(),
@@ -531,6 +647,10 @@ mod tests {
         assert_eq!(
             parse_args(["doctor", "--runtime-dir"]).unwrap_err(),
             CliError::MissingValue("--runtime-dir")
+        );
+        assert_eq!(
+            parse_args(["smoke", "--env", "NOPE"]).unwrap_err(),
+            CliError::InvalidEnv("NOPE".to_string())
         );
     }
 
@@ -599,6 +719,35 @@ mod tests {
             config.run_dir,
             PathBuf::from(format!("/tmp/fend-linux.{}.1234", std::process::id()))
         );
+    }
+
+    #[test]
+    fn builds_smoke_config_with_defaults_and_overrides() {
+        let defaults = PlanDefaults {
+            guest_cid: Some(77),
+            ..sample_defaults()
+        };
+        let config = build_smoke_config(&SmokeOptions::default(), &defaults);
+
+        assert_eq!(config.cid, 77);
+        assert_eq!(config.port, DEFAULT_VSOCK_PORT);
+        assert_eq!(config.cwd, "/workspace");
+        assert_eq!(config.command, ["/bin/echo", "fend-linux-ok"]);
+
+        let options = SmokeOptions {
+            cid: Some(99),
+            port: Some(2048),
+            cwd: "/tmp".to_string(),
+            env: BTreeMap::from([("KEY".to_string(), "VALUE".to_string())]),
+            command: vec!["/bin/true".to_string()],
+        };
+        let config = build_smoke_config(&options, &defaults);
+
+        assert_eq!(config.cid, 99);
+        assert_eq!(config.port, 2048);
+        assert_eq!(config.cwd, "/tmp");
+        assert_eq!(config.env.get("KEY").map(String::as_str), Some("VALUE"));
+        assert_eq!(config.command, ["/bin/true"]);
     }
 
     #[test]
