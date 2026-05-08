@@ -249,6 +249,12 @@ now live in `fend_linux::doctor` and cover x86_64, QEMU, `virtiofsd`, `passt`,
 Docker, Rust musl target, `/dev/kvm`, `/dev/vhost-vsock`, CPU virtualization
 flags, and Linux runtime artifacts.
 
+First real Arch hardware testing reached runtime artifact creation but exposed
+an Arch-specific `virtiofsd` resolution gap: the package installs
+`/usr/lib/virtiofsd`, while the current spike only searches `PATH`. See
+[`docs/linux-arch-debug-handover.md`](./linux-arch-debug-handover.md) for the
+handover, workaround, and next implementation steps.
+
 ## Phase 5: Mirror Watch Mode
 
 Goal: replace Linux polling for long-running dev servers where polling overhead
