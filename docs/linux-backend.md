@@ -25,10 +25,13 @@ x86_64 host. The repo now proves:
 
 The Linux path is still a spike, not a shipped product:
 
-- Linux users still go through `fend-linux`, not the top-level `fend` entry
-  point.
+- The Rust Linux crate now exposes both `fend-linux` and a Linux `fend`
+  binary, and the top-level disposable `fend <command>` path works on a real
+  host.
+- That top-level path is still disposable-only; warm VM reuse and daemon-backed
+  lifecycle parity are not done.
 - Runtime preparation still depends on the developer builder script and Docker.
-- Warm VM reuse, lifecycle cleanup, and interactive TTY parity are not done.
+- Interactive TTY parity and stdin/signal/resize handling are not done.
 - Real release packaging, CI, and distro-facing setup docs are not done.
 
 ## Phase 0: Baseline Quality
@@ -227,8 +230,9 @@ turning the spike into the first Linux product path.
 
 ### P0: Productize The Current Spike
 
-- Route the normal Linux `fend <command>` path into the Rust host backend
-  instead of the separate `fend-linux` spike binary.
+- Expand the new disposable Linux `fend <command>` path beyond one-shot runs:
+  reuse VMs across commands, recover stale state, and stop depending on a
+  per-command boot.
 - Add Linux VM lifecycle management: one VM per project, reuse across commands,
   deterministic shutdown, stale-CID recovery, and orphan sidecar cleanup.
 - Close interactive command parity: TTY allocation, stdin/stdout streaming,
