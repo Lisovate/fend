@@ -10,6 +10,7 @@ use crate::qemu::{LaunchConfig, LaunchPlan, NetworkMode, RuntimeArtifacts};
 use crate::smoke::{
     SmokeConfig, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_SMOKE_TIMEOUT, DEFAULT_VSOCK_PORT,
 };
+use crate::tools::resolve_virtiofsd;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -249,6 +250,9 @@ pub fn build_launch_config(options: &PlanOptions, defaults: &PlanDefaults) -> La
         run_dir,
         options.epoch.unwrap_or(defaults.epoch),
     );
+    if let Some(virtiofsd) = resolve_virtiofsd() {
+        config.virtiofsd = virtiofsd;
+    }
     config.guest_cid = options.guest_cid.or(defaults.guest_cid).unwrap_or(42);
     config.cpus = options.cpus.or(defaults.cpus).unwrap_or(2);
     config.memory_mib = options.memory_mib.or(defaults.memory_mib).unwrap_or(2048);
@@ -330,8 +334,8 @@ pub fn render_launch_plan(plan: &LaunchPlan) -> String {
     writeln!(&mut output).unwrap();
     writeln!(&mut output, "virtiofsd").unwrap();
     for share in &plan.shares {
-        let args = share.virtiofsd_args();
-        let command = shell_command(share.virtiofsd_program(), &args);
+        let (program, args) = share.virtiofsd_command();
+        let command = shell_command(&program, &args);
         writeln!(
             &mut output,
             "  {name:<9} {command} > {log} 2>&1",
@@ -349,6 +353,28 @@ pub fn render_launch_plan(plan: &LaunchPlan) -> String {
         shell_command(plan.qemu_program, &plan.qemu_args)
     )
     .unwrap();
+    output
+}
+
+pub fn render_launch_summary(config: &LaunchConfig) -> String {
+    let runtime_dir = config
+        .artifacts
+        .kernel
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let mut output = String::new();
+    writeln!(&mut output, "fend linux launch").unwrap();
+    writeln!(&mut output, "  workspace  {}", config.workspace.display()).unwrap();
+    writeln!(&mut output, "  runtime    {}", runtime_dir.display()).unwrap();
+    writeln!(&mut output, "  run dir    {}", config.run_dir.display()).unwrap();
+    writeln!(
+        &mut output,
+        "  logs       {}",
+        config.run_dir.join("logs").display()
+    )
+    .unwrap();
+    writeln!(&mut output, "  cid        {}", config.guest_cid).unwrap();
+    writeln!(&mut output, "  network    {}", config.network).unwrap();
     output
 }
 
@@ -777,7 +803,12 @@ mod tests {
             initrd_exists: true,
             rootfs_exists: true,
             qemu_available: true,
-            virtiofsd_available: true,
+            virtiofsd: Some(crate::tools::ResolvedVirtiofsd::direct(
+                "/usr/bin/virtiofsd",
+            )),
+            unshare_available: true,
+            subuid_configured: None,
+            subgid_configured: None,
             passt_available: false,
             docker_available: true,
             rust_musl_target_installed: true,
@@ -814,16 +845,40 @@ mod tests {
             epoch: Some(7),
             ..PlanOptions::default()
         };
-        let config = build_launch_config(&options, &defaults);
+        let mut config = build_launch_config(&options, &defaults);
+        config.virtiofsd = crate::tools::ResolvedVirtiofsd::direct("virtiofsd");
         let plan = build_launch_plan(&config).unwrap();
 
         let rendered = render_launch_plan(&plan);
 
         assert!(rendered.contains("fend linux launch plan"));
+        assert!(rendered.contains("virtiofsd"));
         assert!(rendered.contains("'--socket-path=/tmp/fend run/workspace.sock'"));
         assert!(rendered.contains("'source=/repo/app with spaces'"));
         assert!(rendered.contains("qemu-system-x86_64"));
         assert!(rendered.contains("'socket,id=char-workspace,path=/tmp/fend run/workspace.sock'"));
+    }
+
+    #[test]
+    fn renders_launch_summary_with_runtime_run_dir_and_network() {
+        let defaults = sample_defaults();
+        let config = build_supervised_launch_config(
+            &PlanOptions {
+                workspace: Some(PathBuf::from("/repo/app")),
+                network: Some(NetworkMode::User),
+                ..PlanOptions::default()
+            },
+            &defaults,
+        );
+
+        let rendered = render_launch_summary(&config);
+
+        assert!(rendered.contains("fend linux launch"));
+        assert!(rendered.contains("workspace  /repo/app"));
+        assert!(rendered.contains("runtime    /home/user/.fend/runtime/linux-x86_64"));
+        assert!(rendered.contains("run dir"));
+        assert!(rendered.contains("logs"));
+        assert!(rendered.contains("network    user"));
     }
 
     #[test]

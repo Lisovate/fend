@@ -9,3 +9,4 @@ pub mod doctor;
 pub mod qemu;
 pub mod smoke;
 pub mod supervisor;
+pub mod tools;

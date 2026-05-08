@@ -4,8 +4,8 @@ use std::process::ExitCode;
 use fend_linux::cli::{
     build_launch_config, build_supervised_launch_config, doctor_usage, launch_usage, parse_args,
     plan_defaults_from_env, plan_usage, render_doctor_report, render_launch_plan,
-    resolve_doctor_runtime_dir, resolve_plan_runtime_dir, smoke_usage, usage, CliCommand,
-    HelpTopic,
+    render_launch_summary, resolve_doctor_runtime_dir, resolve_plan_runtime_dir, smoke_usage,
+    usage, CliCommand, HelpTopic,
 };
 use fend_linux::doctor;
 use fend_linux::qemu;
@@ -69,6 +69,8 @@ fn run() -> Result<ExitCode, String> {
                 return Ok(ExitCode::FAILURE);
             }
             let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
+            print!("{}", render_launch_summary(&config));
+            println!();
             let mut supervisor = Supervisor::new(SupervisorOptions::default());
             let mut vm = supervisor
                 .launch_plan(&plan)

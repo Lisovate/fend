@@ -83,6 +83,7 @@ pub enum SupervisorError {
     SocketTimeout {
         label: String,
         path: PathBuf,
+        log_path: PathBuf,
         timeout: Duration,
     },
     ShareSourceMissing {
@@ -96,6 +97,7 @@ pub enum SupervisorError {
     ProcessExited {
         label: String,
         status: ProcessExit,
+        log_path: PathBuf,
     },
 }
 
@@ -129,12 +131,14 @@ impl fmt::Display for SupervisorError {
             Self::SocketTimeout {
                 label,
                 path,
+                log_path,
                 timeout,
             } => write!(
                 f,
-                "timed out after {:.1}s waiting for {label} socket {}",
+                "timed out after {:.1}s waiting for {label} socket {} (see {})",
                 timeout.as_secs_f64(),
-                path.display()
+                path.display(),
+                log_path.display()
             ),
             Self::ShareSourceMissing { label, path } => {
                 write!(f, "{label} share source is missing: {}", path.display())
@@ -146,8 +150,16 @@ impl fmt::Display for SupervisorError {
                     path.display()
                 )
             }
-            Self::ProcessExited { label, status } => {
-                write!(f, "{label} exited before becoming ready ({status})")
+            Self::ProcessExited {
+                label,
+                status,
+                log_path,
+            } => {
+                write!(
+                    f,
+                    "{label} exited before becoming ready ({status}); see {}",
+                    log_path.display()
+                )
             }
         }
     }
@@ -244,10 +256,11 @@ impl<S: ProcessSpawner> Supervisor<S> {
                 return Err(SupervisorError::SocketAlreadyExists(share.socket.clone()));
             }
 
+            let (program, args) = share.virtiofsd_command();
             let spec = ProcessSpec {
                 label: format!("virtiofsd-{}", share.name),
-                program: share.virtiofsd_program().to_string(),
-                args: share.virtiofsd_args(),
+                program,
+                args,
                 io: ProcessIo::Log(share.log.clone()),
             };
             let mut child = self
@@ -255,9 +268,13 @@ impl<S: ProcessSpawner> Supervisor<S> {
                 .spawn(&spec)
                 .map_err(|source| SupervisorError::io("spawn virtiofsd", None, source))?;
 
-            if let Err(error) =
-                wait_for_socket(&mut child, &spec.label, &share.socket, &self.options)
-            {
+            if let Err(error) = wait_for_socket(
+                &mut child,
+                &spec.label,
+                &share.socket,
+                &share.log,
+                &self.options,
+            ) {
                 cleanup_child(&mut child);
                 cleanup_children(&mut virtiofsd);
                 cleanup_sockets(&sockets);
@@ -407,6 +424,7 @@ fn wait_for_socket<C: ManagedChild>(
     child: &mut C,
     label: &str,
     socket: &Path,
+    log_path: &Path,
     options: &SupervisorOptions,
 ) -> Result<(), SupervisorError> {
     let start = Instant::now();
@@ -421,12 +439,14 @@ fn wait_for_socket<C: ManagedChild>(
             return Err(SupervisorError::ProcessExited {
                 label: label.to_string(),
                 status,
+                log_path: log_path.to_path_buf(),
             });
         }
         if start.elapsed() >= options.socket_timeout {
             return Err(SupervisorError::SocketTimeout {
                 label: label.to_string(),
                 path: socket.to_path_buf(),
+                log_path: log_path.to_path_buf(),
                 timeout: options.socket_timeout,
             });
         }
@@ -640,7 +660,8 @@ mod tests {
             error,
             SupervisorError::ProcessExited {
                 ref label,
-                status: ProcessExit { code: Some(1) }
+                status: ProcessExit { code: Some(1) },
+                ..
             } if label == "virtiofsd-workspace"
         ));
     }

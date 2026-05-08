@@ -1,6 +1,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::tools::ResolvedVirtiofsd;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetworkMode {
     Passt,
@@ -25,6 +27,17 @@ impl NetworkMode {
             ],
             Self::Off => &[],
         }
+    }
+}
+
+impl fmt::Display for NetworkMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Passt => "passt",
+            Self::User => "user",
+            Self::Off => "off",
+        };
+        write!(f, "{label}")
     }
 }
 
@@ -53,20 +66,12 @@ pub struct SharePlan {
     pub source: PathBuf,
     pub socket: PathBuf,
     pub log: PathBuf,
+    pub virtiofsd: ResolvedVirtiofsd,
 }
 
 impl SharePlan {
-    pub fn virtiofsd_program(&self) -> &'static str {
-        "virtiofsd"
-    }
-
-    pub fn virtiofsd_args(&self) -> Vec<String> {
-        vec![
-            format!("--socket-path={}", self.socket.display()),
-            "--cache=auto".to_string(),
-            "-o".to_string(),
-            format!("source={}", self.source.display()),
-        ]
+    pub fn virtiofsd_command(&self) -> (String, Vec<String>) {
+        self.virtiofsd.command(&self.socket, &self.source)
     }
 
     fn qemu_chardev_arg(&self) -> String {
@@ -88,6 +93,7 @@ impl SharePlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchConfig {
     pub artifacts: RuntimeArtifacts,
+    pub virtiofsd: ResolvedVirtiofsd,
     pub workspace: PathBuf,
     pub cache_dir: PathBuf,
     pub tools_dir: PathBuf,
@@ -111,6 +117,7 @@ impl LaunchConfig {
     ) -> Self {
         Self {
             artifacts,
+            virtiofsd: ResolvedVirtiofsd::direct("virtiofsd"),
             workspace: workspace.into(),
             cache_dir: cache_dir.into(),
             tools_dir: tools_dir.into(),
@@ -170,6 +177,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
             &config.workspace,
             &config.run_dir,
             &log_dir,
+            &config.virtiofsd,
         ),
         share(
             "cache",
@@ -177,6 +185,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
             &config.cache_dir,
             &config.run_dir,
             &log_dir,
+            &config.virtiofsd,
         ),
         share(
             "tools",
@@ -184,6 +193,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
             &config.tools_dir,
             &config.run_dir,
             &log_dir,
+            &config.virtiofsd,
         ),
     ];
     let kernel_cmdline = kernel_cmdline(config.epoch, &config.guest_workspace);
@@ -284,6 +294,7 @@ fn share(
     source: &Path,
     run_dir: &Path,
     log_dir: &Path,
+    virtiofsd: &ResolvedVirtiofsd,
 ) -> SharePlan {
     SharePlan {
         name,
@@ -291,6 +302,7 @@ fn share(
         source: source.to_path_buf(),
         socket: run_dir.join(format!("{name}.sock")),
         log: log_dir.join(format!("virtiofsd-{name}.log")),
+        virtiofsd: virtiofsd.clone(),
     }
 }
 
@@ -348,14 +360,18 @@ mod tests {
             plan.shares[0].log,
             PathBuf::from("/tmp/fend run/logs/virtiofsd-workspace.log")
         );
+        assert_eq!(plan.shares[0].virtiofsd.path, PathBuf::from("virtiofsd"));
         assert_eq!(
-            plan.shares[0].virtiofsd_args(),
-            [
-                "--socket-path=/tmp/fend run/workspace.sock",
-                "--cache=auto",
-                "-o",
-                "source=/home/pawel/project with spaces"
-            ]
+            plan.shares[0].virtiofsd_command(),
+            (
+                "virtiofsd".to_string(),
+                vec![
+                    "--socket-path=/tmp/fend run/workspace.sock".to_string(),
+                    "--cache=auto".to_string(),
+                    "-o".to_string(),
+                    "source=/home/pawel/project with spaces".to_string(),
+                ]
+            )
         );
 
         assert_eq!(
@@ -462,6 +478,35 @@ mod tests {
         assert_eq!(
             build_launch_plan(&config).unwrap_err(),
             PlanError::EmptyGuestWorkspace
+        );
+    }
+
+    #[test]
+    fn arch_style_virtiofsd_uses_unshare_wrapper() {
+        let mut config = sample_config(NetworkMode::Off);
+        config.virtiofsd = ResolvedVirtiofsd {
+            path: PathBuf::from("/usr/lib/virtiofsd"),
+            mode: crate::tools::VirtiofsdMode::RootlessUnshare,
+        };
+
+        let plan = build_launch_plan(&config).unwrap();
+
+        assert_eq!(
+            plan.shares[0].virtiofsd_command(),
+            (
+                "unshare".to_string(),
+                vec![
+                    "-r".to_string(),
+                    "--map-auto".to_string(),
+                    "--".to_string(),
+                    "/usr/lib/virtiofsd".to_string(),
+                    "--socket-path=/tmp/fend run/workspace.sock".to_string(),
+                    "--shared-dir".to_string(),
+                    "/home/pawel/project with spaces".to_string(),
+                    "--sandbox".to_string(),
+                    "chroot".to_string(),
+                ]
+            )
         );
     }
 

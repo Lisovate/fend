@@ -75,7 +75,7 @@ cat > "${FAKEBIN}/strings" <<'EOF'
 printf '6.8.0-100-generic\n'
 EOF
 
-for cmd in qemu-system-x86_64 virtiofsd passt cargo curl; do
+for cmd in qemu-system-x86_64 virtiofsd passt cargo curl unshare; do
     cat > "${FAKEBIN}/${cmd}" <<'EOF'
 #!/usr/bin/env bash
 exit 0
@@ -118,6 +118,18 @@ run_ok "prepare-check" \
 run_ok "qemu-check" \
     env "${COMMON_ENV[@]}" "FEND_DEV_DIR=${DEV_DIR}" \
     "${PROJECT_ROOT}/scripts/linux-qemu-spike.sh" --check "${WORKSPACE}"
+
+ARCH_VIRTIOFSD="${TMP_ROOT}/usr/lib/virtiofsd"
+mkdir -p "$(dirname "${ARCH_VIRTIOFSD}")"
+touch "${ARCH_VIRTIOFSD}"
+chmod +x "${ARCH_VIRTIOFSD}"
+run_ok "qemu-check-arch-virtiofsd" \
+    env "${COMMON_ENV[@]}" "FEND_DEV_DIR=${DEV_DIR}" "FEND_VIRTIOFSD=${ARCH_VIRTIOFSD}" \
+    "${PROJECT_ROOT}/scripts/linux-qemu-spike.sh" --check "${WORKSPACE}"
+grep -q "${ARCH_VIRTIOFSD}" "${TMP_ROOT}/qemu-check-arch-virtiofsd.out" \
+    || fail "qemu-check-arch-virtiofsd: expected resolved virtiofsd path"
+grep -q "unshare" "${TMP_ROOT}/qemu-check-arch-virtiofsd.out" \
+    || fail "qemu-check-arch-virtiofsd: expected rootless unshare check"
 
 rm -f "${RUNTIME_DIR}/rootfs.img"
 run_fail "qemu-check-missing-rootfs" \

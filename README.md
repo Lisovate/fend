@@ -12,8 +12,9 @@ fend audit --fix        # propose + apply safe upgrades
 > **Status: alpha — macOS Apple Silicon only.** The Swift CLI, the Rust guest
 > agent, the warm-VM daemon, port forwarding, the shell hook, and the audit
 > flow all work end-to-end. The npm package (`@fendsh/cli`) is still a
-> placeholder; for now you build from source. Linux & Windows are on the
-> roadmap, not in this release.
+> placeholder; for now you build from source. The Linux QEMU/KVM spike is
+> validated on real Arch hardware as of 2026-05-08, but Linux is not packaged
+> or supported in this release yet. Windows remains roadmap-only.
 
 ---
 

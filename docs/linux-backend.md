@@ -7,6 +7,30 @@ controlled per command, and warm reuse for repeated commands.
 The Linux implementation should be split into phases. Each phase should leave
 the repo in a shippable or at least testable state.
 
+## Current Status
+
+As of 2026-05-08, the Linux QEMU/KVM spike has been validated on a real Arch
+x86_64 host. The repo now proves:
+
+- `fend-linux doctor` passes on Arch with distro-packaged `virtiofsd`.
+- `fend-linux launch` boots the guest with both `--network user` and
+  `--network passt`.
+- `fendd` binds vsock port `1024`, and both smoke clients execute commands in
+  `/workspace`.
+- VirtioFS workspace writes round-trip back to the host under Arch's rootless
+  `virtiofsd` setup.
+- Normal guest egress works with `--network passt`.
+- Per-command `FEND_NETWORK_MODE=off` still blocks DNS/connectivity inside the
+  child process.
+
+The Linux path is still a spike, not a shipped product:
+
+- Linux users still go through `fend-linux`, not the top-level `fend` entry
+  point.
+- Runtime preparation still depends on the developer builder script and Docker.
+- Warm VM reuse, lifecycle cleanup, and interactive TTY parity are not done.
+- Real release packaging, CI, and distro-facing setup docs are not done.
+
 ## Phase 0: Baseline Quality
 
 Goal: keep the current macOS implementation stable while Linux work starts.
@@ -183,6 +207,60 @@ The expected result for the second command is a DNS/connectivity failure from
 inside the sandboxed child process, while the VM itself may still have network
 for package-manager and daemon needs.
 
+`curl` is the preferred guest networking smoke check. `ping` is not reliable
+for this path because guest commands run unprivileged and raw ICMP sockets are
+expected to fail without additional capabilities.
+
+## Linux MVP Checklist
+
+The spike answered "can Fend work on Linux?" with yes. The remaining work is
+turning the spike into the first Linux product path.
+
+### P0: Productize The Current Spike
+
+- Route the normal Linux `fend <command>` path into the Rust host backend
+  instead of the separate `fend-linux` spike binary.
+- Add Linux VM lifecycle management: one VM per project, reuse across commands,
+  deterministic shutdown, stale-CID recovery, and orphan sidecar cleanup.
+- Close interactive command parity: TTY allocation, stdin/stdout streaming,
+  signal forwarding, window resize, and clean Ctrl-C behavior for long-running
+  commands like `npm run dev`.
+- Validate port forwarding and network event reporting on the Rust Linux path,
+  not only command execution smoke.
+- Soak the current workspace/cache/tools mount model with real Node workflows
+  on Arch and Ubuntu.
+
+### P1: Remove Developer-Only Setup Friction
+
+- Replace the current Docker-based runtime builder with an end-user runtime
+  install flow.
+- Decide what ships versus what stays distro-provided: QEMU, `virtiofsd`,
+  `passt`, kernel/initrd/rootfs, and tool bundles.
+- Add Linux packaging to the npm distribution story, including platform
+  selection and runtime bootstrap.
+- Expand `doctor` so it covers the real end-user setup path and not only the
+  spike prerequisites.
+
+### P2: Match macOS Behavior Where It Matters
+
+- Preserve the same command policy surface as macOS: network on/off, audit
+  flows, tool mounts, shell hook behavior, and consistent logs.
+- Confirm package-manager workflows end-to-end: `npm install`, `pnpm install`,
+  `bun install`, test commands, and dev servers with forwarded ports.
+- Harden ownership semantics for workspace, cache, and tools so user-visible
+  behavior is stable across rootless/share configurations.
+- Add Linux soak coverage in CI or dedicated host runners for Arch and Ubuntu.
+
+### Linux MVP Exit Criteria
+
+- `fend node -v` works from the top-level CLI on Linux x86_64.
+- `fend npm install` and `fend npm run dev` work on real projects without
+  manual runtime-prep steps beyond documented host prerequisites.
+- Port forwarding, network isolation, and signal handling behave the same way a
+  user would expect from the macOS product.
+- `fend doctor` gives actionable setup output on Arch and Ubuntu.
+- The Linux path is covered by repeatable end-to-end tests on real KVM hosts.
+
 ## Phase 2: Backend Boundary
 
 Goal: separate host orchestration from macOS Virtualization.framework specifics.
@@ -249,11 +327,13 @@ now live in `fend_linux::doctor` and cover x86_64, QEMU, `virtiofsd`, `passt`,
 Docker, Rust musl target, `/dev/kvm`, `/dev/vhost-vsock`, CPU virtualization
 flags, and Linux runtime artifacts.
 
-First real Arch hardware testing reached runtime artifact creation but exposed
-an Arch-specific `virtiofsd` resolution gap: the package installs
-`/usr/lib/virtiofsd`, while the current spike only searches `PATH`. See
-[`docs/linux-arch-debug-handover.md`](./linux-arch-debug-handover.md) for the
-handover, workaround, and next implementation steps.
+First real Arch hardware testing initially exposed an Arch-specific
+`virtiofsd` resolution gap: the package installs `/usr/lib/virtiofsd`, while
+the early spike only searched `PATH`. That issue, the related rootless
+`virtiofsd` launch handling, the guest-side vsock module loading, the rootless
+workspace ownership fix, and the `passt` NIC-name assumption are now resolved.
+[`docs/linux-arch-debug-handover.md`](./linux-arch-debug-handover.md) remains
+as a historical handover and debugging record.
 
 ## Phase 5: Mirror Watch Mode
 

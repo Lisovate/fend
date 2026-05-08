@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::qemu::{NetworkMode, RuntimeArtifacts};
+use crate::tools::{resolve_virtiofsd, ResolvedVirtiofsd};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceStatus {
@@ -34,7 +35,10 @@ pub struct HostProbe {
     pub initrd_exists: bool,
     pub rootfs_exists: bool,
     pub qemu_available: bool,
-    pub virtiofsd_available: bool,
+    pub virtiofsd: Option<ResolvedVirtiofsd>,
+    pub unshare_available: bool,
+    pub subuid_configured: Option<bool>,
+    pub subgid_configured: Option<bool>,
     pub passt_available: bool,
     pub docker_available: bool,
     pub rust_musl_target_installed: bool,
@@ -65,6 +69,11 @@ fn current_probe_with_builder_checks(
 ) -> HostProbe {
     let runtime_dir = runtime_dir.as_ref().to_path_buf();
     let artifacts = RuntimeArtifacts::from_runtime_dir(&runtime_dir);
+    let virtiofsd = resolve_virtiofsd();
+    let rootless_virtiofsd = virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false);
 
     HostProbe {
         os: std::env::consts::OS.to_string(),
@@ -74,7 +83,10 @@ fn current_probe_with_builder_checks(
         initrd_exists: artifacts.initrd.is_file(),
         rootfs_exists: artifacts.rootfs.is_file(),
         qemu_available: command_exists("qemu-system-x86_64"),
-        virtiofsd_available: command_exists("virtiofsd"),
+        virtiofsd,
+        unshare_available: !rootless_virtiofsd || command_exists("unshare"),
+        subuid_configured: rootless_virtiofsd.then(|| subordinate_id_configured("/etc/subuid")),
+        subgid_configured: rootless_virtiofsd.then(|| subordinate_id_configured("/etc/subgid")),
         passt_available: command_exists("passt"),
         docker_available: include_builder_checks && process_succeeds("docker", &["info"]),
         rust_musl_target_installed: include_builder_checks
@@ -138,8 +150,30 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
     if !probe.qemu_available {
         issues.push("Install qemu-system-x86_64, for example Arch package qemu-full.".to_string());
     }
-    if !probe.virtiofsd_available {
-        issues.push("Install virtiofsd.".to_string());
+    if probe.virtiofsd.is_none() {
+        issues.push("Install virtiofsd, or set FEND_VIRTIOFSD to the binary path.".to_string());
+    }
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+        && !probe.unshare_available
+    {
+        issues
+            .push("Install unshare (usually from util-linux) for rootless virtiofsd.".to_string());
+    }
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+        && (probe.subuid_configured == Some(false) || probe.subgid_configured == Some(false))
+    {
+        issues.push(
+            "Current user is missing /etc/subuid or /etc/subgid mappings required for rootless virtiofsd."
+                .to_string(),
+        );
     }
     if require_passt && !probe.passt_available {
         issues.push("Install passt, or launch with FEND_QEMU_NETWORK=user/off.".to_string());
@@ -202,11 +236,34 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
         ("qemu".to_string(), available_value(probe.qemu_available)),
         (
             "virtiofsd".to_string(),
-            available_value(probe.virtiofsd_available),
+            probe
+                .virtiofsd
+                .as_ref()
+                .map(ResolvedVirtiofsd::display_value)
+                .unwrap_or_else(|| "missing".to_string()),
         ),
     ];
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+    {
+        fields.push((
+            "unshare".to_string(),
+            available_value(probe.unshare_available),
+        ));
+        fields.push((
+            "subuid".to_string(),
+            subordinate_id_value(probe.subuid_configured),
+        ));
+        fields.push((
+            "subgid".to_string(),
+            subordinate_id_value(probe.subgid_configured),
+        ));
+    }
     if let Some(network) = options.network {
-        fields.push(("network".to_string(), network_value(network).to_string()));
+        fields.push(("network".to_string(), network.to_string()));
     }
     if options.network.is_none() || require_passt {
         fields.push(("passt".to_string(), available_value(probe.passt_available)));
@@ -246,14 +303,6 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
     }
 }
 
-fn network_value(network: NetworkMode) -> &'static str {
-    match network {
-        NetworkMode::Passt => "passt",
-        NetworkMode::User => "user",
-        NetworkMode::Off => "off",
-    }
-}
-
 fn artifact_value(path: &Path, exists: bool) -> String {
     if exists {
         path.display().to_string()
@@ -267,6 +316,14 @@ fn available_value(value: bool) -> String {
         "available".to_string()
     } else {
         "missing".to_string()
+    }
+}
+
+fn subordinate_id_value(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "configured".to_string(),
+        Some(false) => "missing".to_string(),
+        None => "not checked".to_string(),
     }
 }
 
@@ -312,6 +369,25 @@ fn rust_target_installed(target: &str) -> bool {
     stdout.lines().any(|line| line.trim() == target)
 }
 
+fn subordinate_id_configured(path: impl AsRef<Path>) -> bool {
+    let Some(user) = current_user_name() else {
+        return false;
+    };
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    contents
+        .lines()
+        .any(|line| line.starts_with(&format!("{user}:")))
+}
+
+fn current_user_name() -> Option<String> {
+    env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var("LOGNAME").ok().filter(|value| !value.is_empty()))
+}
+
 fn cpu_virtualization_available() -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
@@ -335,6 +411,7 @@ mod tests {
 
         assert!(report.issues.is_empty());
         assert_eq!(field(&report, "qemu"), Some("available"));
+        assert_eq!(field(&report, "virtiofsd"), Some("/usr/bin/virtiofsd"));
         assert_eq!(field(&report, "/dev/kvm"), Some("/dev/kvm"));
         assert_eq!(field(&report, "rust target"), Some("installed"));
         assert_eq!(
@@ -352,7 +429,7 @@ mod tests {
         probe.rootfs_exists = false;
         probe.docker_available = false;
         probe.qemu_available = false;
-        probe.virtiofsd_available = false;
+        probe.virtiofsd = None;
         probe.passt_available = false;
         probe.rust_musl_target_installed = false;
         probe.cpu_virtualization_available = Some(false);
@@ -380,7 +457,10 @@ mod tests {
             &report.issues,
             "Install qemu-system-x86_64, for example Arch package qemu-full.",
         );
-        assert_contains(&report.issues, "Install virtiofsd.");
+        assert_contains(
+            &report.issues,
+            "Install virtiofsd, or set FEND_VIRTIOFSD to the binary path.",
+        );
         assert_contains(
             &report.issues,
             "Install passt, or launch with FEND_QEMU_NETWORK=user/off.",
@@ -506,6 +586,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rootless_virtiofsd_requires_unshare_and_subordinate_ids() {
+        let mut probe = linux_probe();
+        probe.virtiofsd = Some(ResolvedVirtiofsd {
+            path: PathBuf::from("/usr/lib/virtiofsd"),
+            mode: crate::tools::VirtiofsdMode::RootlessUnshare,
+        });
+        probe.unshare_available = false;
+        probe.subuid_configured = Some(false);
+        probe.subgid_configured = Some(true);
+
+        let report = evaluate_launch(&probe, NetworkMode::User);
+
+        assert_contains(
+            &report.issues,
+            "Install unshare (usually from util-linux) for rootless virtiofsd.",
+        );
+        assert_contains(
+            &report.issues,
+            "Current user is missing /etc/subuid or /etc/subgid mappings required for rootless virtiofsd.",
+        );
+        assert_eq!(
+            field(&report, "virtiofsd"),
+            Some("/usr/lib/virtiofsd (rootless via unshare)")
+        );
+        assert_eq!(field(&report, "unshare"), Some("missing"));
+        assert_eq!(field(&report, "subuid"), Some("missing"));
+        assert_eq!(field(&report, "subgid"), Some("configured"));
+    }
+
     fn linux_probe() -> HostProbe {
         HostProbe {
             os: "linux".to_string(),
@@ -515,7 +625,10 @@ mod tests {
             initrd_exists: true,
             rootfs_exists: true,
             qemu_available: true,
-            virtiofsd_available: true,
+            virtiofsd: Some(ResolvedVirtiofsd::direct("/usr/bin/virtiofsd")),
+            unshare_available: true,
+            subuid_configured: None,
+            subgid_configured: None,
             passt_available: true,
             docker_available: true,
             rust_musl_target_installed: true,

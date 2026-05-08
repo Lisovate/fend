@@ -4,6 +4,24 @@ This handover captures the first real Arch Linux test run for the Linux
 QEMU/KVM spike. It is written for a Linux-side Codex CLI session so debugging
 can continue directly on the target machine.
 
+## Status
+
+This document is now historical. The first-run Arch blockers described below
+were resolved on 2026-05-08.
+
+End-to-end Arch validation now passes for the spike path:
+
+- distro-packaged `/usr/lib/virtiofsd` is resolved correctly
+- Arch-style rootless `virtiofsd` launch works
+- the guest boots, `fendd` reaches `ready`, and vsock command execution works
+- workspace writes round-trip back to the host
+- `--network passt` works for normal guest egress
+- per-command `FEND_NETWORK_MODE=off` still blocks guest DNS/connectivity
+
+Use [`docs/linux-backend.md`](./linux-backend.md) for the current Linux status
+and next-step checklist. Keep this file as the debugging record for the
+original Arch bring-up failure.
+
 ## Context
 
 - Repo: `https://github.com/Lisovate/fend.git`
@@ -51,7 +69,7 @@ The runtime builder downloaded Ubuntu 24.04 amd64 cloud kernel/initrd files,
 built a musl `fendd`, created a Docker-built Ubuntu rootfs, installed matching
 kernel modules, and wrote a 249 MB `rootfs.img`.
 
-## What Failed
+## What Failed In The First Run
 
 `fend-linux doctor`, `scripts/linux-qemu-spike.sh --check`, and
 `fend-linux launch` all reported:
@@ -107,7 +125,7 @@ Do not debug `smoke` first. It depends on `fend-linux launch` getting past
 preflight, starting three `virtiofsd` sidecars, starting QEMU, booting the
 guest, and `fendd` binding vsock port `1024`.
 
-## Immediate Linux Workaround
+## Immediate Linux Workaround Used At The Time
 
 To unblock validation without changing code, make `virtiofsd` visible in
 `PATH` for the current shell:
@@ -151,7 +169,7 @@ sed -n '1,200p' /tmp/fend-linux-debug/logs/virtiofsd-cache.log
 sed -n '1,200p' /tmp/fend-linux-debug/logs/virtiofsd-tools.log
 ```
 
-## Likely Next Failure
+## Likely Next Failure At That Point
 
 After the binary path is fixed, Arch may still fail because the current
 supervisor starts `virtiofsd` directly as the regular user:
@@ -202,7 +220,7 @@ If missing, add mappings and log in again:
 sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$USER"
 ```
 
-## Code Changes To Make
+## Code Changes That Were Needed
 
 Keep Linux code separate from Swift/macOS unless the change is docs-only.
 
