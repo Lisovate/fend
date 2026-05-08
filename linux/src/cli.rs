@@ -18,6 +18,7 @@ pub enum CliCommand {
     Doctor(DoctorOptions),
     Plan(PlanOptions),
     Launch(PlanOptions),
+    Run(RunOptions),
     Stop(StopOptions),
     Smoke(SmokeOptions),
 }
@@ -28,6 +29,7 @@ pub enum HelpTopic {
     Doctor,
     Plan,
     Launch,
+    Run,
     Stop,
     Smoke,
 }
@@ -41,6 +43,51 @@ pub struct DoctorOptions {
 pub struct StopOptions {
     pub run_dir: Option<PathBuf>,
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandNetworkMode {
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunOptions {
+    pub runtime_dir: Option<PathBuf>,
+    pub workspace: Option<PathBuf>,
+    pub cache_dir: Option<PathBuf>,
+    pub tools_dir: Option<PathBuf>,
+    pub run_dir: Option<PathBuf>,
+    pub guest_cid: Option<u32>,
+    pub cpus: Option<u16>,
+    pub memory_mib: Option<u32>,
+    pub vm_network: Option<NetworkMode>,
+    pub timeout_secs: Option<u64>,
+    pub cwd: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub network: Option<CommandNetworkMode>,
+    pub command: Vec<String>,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            runtime_dir: None,
+            workspace: None,
+            cache_dir: None,
+            tools_dir: None,
+            run_dir: None,
+            guest_cid: None,
+            cpus: None,
+            memory_mib: None,
+            vm_network: None,
+            timeout_secs: None,
+            cwd: None,
+            env: BTreeMap::new(),
+            network: None,
+            command: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,9 +167,11 @@ pub enum CliError {
     UnknownCommand(String),
     UnknownOption(String),
     MissingValue(&'static str),
+    MissingCommand,
     UnexpectedArgument(String),
     InvalidEnv(String),
     InvalidNetwork(String),
+    InvalidCommandNetwork(String),
     InvalidNumber { option: &'static str, value: String },
     HelpRequested(HelpTopic),
 }
@@ -133,10 +182,14 @@ impl fmt::Display for CliError {
             Self::UnknownCommand(command) => write!(f, "unknown command: {command}"),
             Self::UnknownOption(option) => write!(f, "unknown option: {option}"),
             Self::MissingValue(option) => write!(f, "missing value for {option}"),
+            Self::MissingCommand => write!(f, "no command specified"),
             Self::UnexpectedArgument(argument) => write!(f, "unexpected argument: {argument}"),
             Self::InvalidEnv(value) => write!(f, "invalid env value {value:?}; use KEY=VALUE"),
             Self::InvalidNetwork(value) => {
                 write!(f, "invalid network mode {value:?}; use passt, user, or off")
+            }
+            Self::InvalidCommandNetwork(value) => {
+                write!(f, "invalid command network mode {value:?}; use on or off")
             }
             Self::InvalidNumber { option, value } => {
                 write!(f, "invalid numeric value for {option}: {value:?}")
@@ -149,7 +202,7 @@ impl fmt::Display for CliError {
 impl std::error::Error for CliError {}
 
 pub fn usage() -> &'static str {
-    "usage: fend-linux <command> [options]\n\ncommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nrun 'fend-linux <command> --help' for command options.\n"
+    "usage: fend-linux <subcommand> [options]\n       fend-linux [run options] -- <command> [args...]\n       fend-linux [run options] <command> [args...]\n\nsubcommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  run         Launch a disposable VM, run one command, and tear it down.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nIf no subcommand is given, fend-linux treats the remaining arguments as a sandboxed command to run.\n"
 }
 
 pub fn doctor_usage() -> &'static str {
@@ -162,6 +215,10 @@ pub fn plan_usage() -> &'static str {
 
 pub fn launch_usage() -> &'static str {
     "usage: fend-linux launch [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+}
+
+pub fn run_usage() -> &'static str {
+    "usage: fend-linux run [options] -- <command> [args...]\n       fend-linux [options] <command> [args...]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory to mount. Default: current directory.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --vm-network mode      passt, user, or off. Default: passt.\n  --network mode         Command network policy: on or off. Default: on.\n  --timeout sec          Wait for fendd / command completion. Default: 30.\n  --cwd path             Guest working directory. Default: /workspace.\n  --env KEY=VALUE        Extra environment variable for the guest command.\n\nThis path is disposable: it boots a VM, runs one command, streams output, and tears the VM down.\n"
 }
 
 pub fn stop_usage() -> &'static str {
@@ -187,9 +244,13 @@ where
         "doctor" => parse_doctor(args),
         "plan" => parse_plan(args),
         "launch" => parse_launch(args),
+        "run" => parse_run(args),
         "stop" => parse_stop(args),
         "smoke" => parse_smoke(args),
-        other => Err(CliError::UnknownCommand(other.to_string())),
+        _ => {
+            args.push_front(command);
+            parse_run(args)
+        }
     }
 }
 
@@ -298,6 +359,46 @@ pub fn build_supervised_launch_config(
         ));
     }
     config
+}
+
+pub fn build_run_launch_config(options: &RunOptions, defaults: &PlanDefaults) -> LaunchConfig {
+    let plan_options = PlanOptions {
+        runtime_dir: options.runtime_dir.clone(),
+        workspace: options.workspace.clone(),
+        cache_dir: options.cache_dir.clone(),
+        tools_dir: options.tools_dir.clone(),
+        run_dir: options.run_dir.clone(),
+        guest_cid: options.guest_cid,
+        cpus: options.cpus,
+        memory_mib: options.memory_mib,
+        network: options.vm_network,
+        epoch: None,
+        guest_workspace: "/workspace".to_string(),
+    };
+    build_supervised_launch_config(&plan_options, defaults)
+}
+
+pub fn build_run_smoke_config(options: &RunOptions, config: &LaunchConfig) -> SmokeConfig {
+    let mut env = options.env.clone();
+    if matches!(options.network, Some(CommandNetworkMode::Off)) {
+        env.insert("FEND_NETWORK_MODE".to_string(), "off".to_string());
+    }
+
+    SmokeConfig {
+        cid: config.guest_cid,
+        port: DEFAULT_VSOCK_PORT,
+        timeout: options
+            .timeout_secs
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_SMOKE_TIMEOUT),
+        max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+        cwd: options
+            .cwd
+            .clone()
+            .unwrap_or_else(|| config.guest_workspace.clone()),
+        env,
+        command: options.command.clone(),
+    }
 }
 
 pub fn build_smoke_config(options: &SmokeOptions, defaults: &PlanDefaults) -> SmokeConfig {
@@ -439,6 +540,59 @@ fn parse_launch(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
         Err(CliError::HelpRequested(topic)) => Ok(CliCommand::Help(topic)),
         Err(error) => Err(error),
     }
+}
+
+fn parse_run(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
+    let mut options = RunOptions::default();
+    while let Some(arg) = args.pop_front() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Run)),
+            "--runtime-dir" => options.runtime_dir = Some(value_path(&mut args, "--runtime-dir")?),
+            "--workspace" => options.workspace = Some(value_path(&mut args, "--workspace")?),
+            "--cache-dir" => options.cache_dir = Some(value_path(&mut args, "--cache-dir")?),
+            "--tools-dir" => options.tools_dir = Some(value_path(&mut args, "--tools-dir")?),
+            "--run-dir" => options.run_dir = Some(value_path(&mut args, "--run-dir")?),
+            "--cid" => options.guest_cid = Some(value_number(&mut args, "--cid")?),
+            "--cpus" => options.cpus = Some(value_number(&mut args, "--cpus")?),
+            "--memory-mib" => options.memory_mib = Some(value_number(&mut args, "--memory-mib")?),
+            "--vm-network" => {
+                let value = value(&mut args, "--vm-network")?;
+                options.vm_network = Some(network_mode_from_str(&value)?);
+            }
+            "--network" => {
+                let value = value(&mut args, "--network")?;
+                options.network = Some(command_network_mode_from_str(&value)?);
+            }
+            "--timeout" => options.timeout_secs = Some(value_number(&mut args, "--timeout")?),
+            "--cwd" => options.cwd = Some(value(&mut args, "--cwd")?),
+            "--env" => {
+                let item = value(&mut args, "--env")?;
+                let (key, value) = item
+                    .split_once('=')
+                    .ok_or_else(|| CliError::InvalidEnv(item.clone()))?;
+                if key.is_empty() {
+                    return Err(CliError::InvalidEnv(item));
+                }
+                options.env.insert(key.to_string(), value.to_string());
+            }
+            "--" => {
+                options.command.extend(args);
+                break;
+            }
+            other if other.starts_with('-') => return Err(CliError::UnknownOption(arg)),
+            _ => {
+                options.command.push(arg);
+                options.command.extend(args);
+                break;
+            }
+        }
+    }
+
+    if options.command.is_empty() {
+        return Err(CliError::MissingCommand);
+    }
+
+    Ok(CliCommand::Run(options))
 }
 
 fn parse_stop(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
@@ -583,6 +737,14 @@ fn network_mode_from_str(value: &str) -> Result<NetworkMode, CliError> {
     }
 }
 
+fn command_network_mode_from_str(value: &str) -> Result<CommandNetworkMode, CliError> {
+    match value {
+        "on" => Ok(CommandNetworkMode::On),
+        "off" => Ok(CommandNetworkMode::Off),
+        _ => Err(CliError::InvalidCommandNetwork(value.to_string())),
+    }
+}
+
 fn current_epoch() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -670,6 +832,41 @@ mod tests {
         };
         assert_eq!(options.workspace, Some(PathBuf::from("/repo/app")));
         assert_eq!(options.network, Some(NetworkMode::Off));
+    }
+
+    #[test]
+    fn parses_default_run_command_with_options() {
+        let command = parse_args([
+            "--network",
+            "off",
+            "--vm-network",
+            "user",
+            "--timeout",
+            "9",
+            "--env",
+            "KEY=VALUE",
+            "npm",
+            "install",
+        ])
+        .unwrap();
+
+        let CliCommand::Run(options) = command else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(options.network, Some(CommandNetworkMode::Off));
+        assert_eq!(options.vm_network, Some(NetworkMode::User));
+        assert_eq!(options.timeout_secs, Some(9));
+        assert_eq!(options.env.get("KEY").map(String::as_str), Some("VALUE"));
+        assert_eq!(options.command, ["npm", "install"]);
+    }
+
+    #[test]
+    fn parses_explicit_run_help() {
+        assert_eq!(
+            parse_args(["run", "--help"]).unwrap(),
+            CliCommand::Help(HelpTopic::Run)
+        );
     }
 
     #[test]
@@ -858,6 +1055,34 @@ mod tests {
         assert_eq!(config.cwd, "/tmp");
         assert_eq!(config.env.get("KEY").map(String::as_str), Some("VALUE"));
         assert_eq!(config.command, ["/bin/true"]);
+    }
+
+    #[test]
+    fn builds_run_configs_with_command_network_override() {
+        let defaults = sample_defaults();
+        let options = RunOptions {
+            workspace: Some(PathBuf::from("/repo/app")),
+            vm_network: Some(NetworkMode::User),
+            network: Some(CommandNetworkMode::Off),
+            timeout_secs: Some(7),
+            env: BTreeMap::from([("KEY".to_string(), "VALUE".to_string())]),
+            command: vec!["/bin/echo".to_string(), "ok".to_string()],
+            ..RunOptions::default()
+        };
+
+        let launch = build_run_launch_config(&options, &defaults);
+        let smoke = build_run_smoke_config(&options, &launch);
+
+        assert_eq!(launch.workspace, PathBuf::from("/repo/app"));
+        assert_eq!(launch.network, NetworkMode::User);
+        assert_eq!(smoke.timeout, Duration::from_secs(7));
+        assert_eq!(smoke.cwd, "/workspace");
+        assert_eq!(smoke.env.get("KEY").map(String::as_str), Some("VALUE"));
+        assert_eq!(
+            smoke.env.get("FEND_NETWORK_MODE").map(String::as_str),
+            Some("off")
+        );
+        assert_eq!(smoke.command, ["/bin/echo", "ok"]);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! launch plans, checks Linux/KVM prerequisites, supervises helper processes,
 //! and verifies guest command execution over vsock.
 
+pub mod app;
 pub mod cli;
 pub mod doctor;
 pub mod qemu;
