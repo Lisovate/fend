@@ -175,6 +175,15 @@ FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
   cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- launch /path/to/project
 ```
 
+`fend-linux launch` prints the exact run dir it chose. Use that run dir with
+`fend-linux stop` from another terminal when you want to tear the stack down
+without hunting PIDs manually:
+
+```bash
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- stop \
+  --run-dir /tmp/fend-linux-debug
+```
+
 The shell spike remains useful as a readable reference and fallback while the
 Rust Linux host runner is built out:
 
