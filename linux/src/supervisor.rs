@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 use crate::qemu::{LaunchPlan, SharePlan};
 
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const STOP_KILL_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcessIo {
     Inherit,
@@ -70,6 +73,12 @@ impl Default for SupervisorOptions {
             poll_interval: Duration::from_millis(100),
         }
     }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct StopReport {
+    pub terminated: Vec<String>,
+    pub stale: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -249,9 +258,11 @@ impl<S: ProcessSpawner> Supervisor<S> {
 
         let mut virtiofsd = Vec::new();
         let mut sockets = Vec::new();
+        let mut pid_files = Vec::new();
 
         for share in &plan.shares {
             if share.socket.exists() {
+                cleanup_pid_files(&pid_files);
                 cleanup_children(&mut virtiofsd);
                 return Err(SupervisorError::SocketAlreadyExists(share.socket.clone()));
             }
@@ -276,11 +287,26 @@ impl<S: ProcessSpawner> Supervisor<S> {
                 &self.options,
             ) {
                 cleanup_child(&mut child);
+                cleanup_pid_files(&pid_files);
                 cleanup_children(&mut virtiofsd);
                 cleanup_sockets(&sockets);
                 return Err(error);
             }
 
+            let pid_file = pid_file_path(&plan.run_dir, &spec.label);
+            if let Err(source) = write_pid_file(&pid_file, child.id()) {
+                cleanup_child(&mut child);
+                cleanup_pid_files(&pid_files);
+                cleanup_children(&mut virtiofsd);
+                cleanup_sockets(&sockets);
+                return Err(SupervisorError::io(
+                    "write pid file",
+                    Some(pid_file),
+                    source,
+                ));
+            }
+
+            pid_files.push(pid_file);
             sockets.push(share.socket.clone());
             virtiofsd.push(child);
         }
@@ -294,16 +320,33 @@ impl<S: ProcessSpawner> Supervisor<S> {
         let qemu = match self.spawner.spawn(&qemu_spec) {
             Ok(child) => child,
             Err(source) => {
+                cleanup_pid_files(&pid_files);
                 cleanup_children(&mut virtiofsd);
                 cleanup_sockets(&sockets);
                 return Err(SupervisorError::io("spawn qemu", None, source));
             }
         };
 
+        let qemu_pid_file = pid_file_path(&plan.run_dir, &qemu_spec.label);
+        if let Err(source) = write_pid_file(&qemu_pid_file, qemu.id()) {
+            let mut qemu = qemu;
+            cleanup_child(&mut qemu);
+            cleanup_pid_files(&pid_files);
+            cleanup_children(&mut virtiofsd);
+            cleanup_sockets(&sockets);
+            return Err(SupervisorError::io(
+                "write pid file",
+                Some(qemu_pid_file),
+                source,
+            ));
+        }
+        pid_files.push(qemu_pid_file);
+
         Ok(RunningVm {
             qemu: Some(qemu),
             virtiofsd,
             sockets,
+            pid_files,
             cleaned_up: false,
         })
     }
@@ -314,6 +357,7 @@ pub struct RunningVm<C: ManagedChild> {
     qemu: Option<C>,
     virtiofsd: Vec<C>,
     sockets: Vec<PathBuf>,
+    pid_files: Vec<PathBuf>,
     cleaned_up: bool,
 }
 
@@ -345,6 +389,7 @@ impl<C: ManagedChild> RunningVm<C> {
             cleanup_child(&mut qemu);
         }
         cleanup_children(&mut self.virtiofsd);
+        cleanup_pid_files(&self.pid_files);
         cleanup_sockets(&self.sockets);
         self.cleaned_up = true;
     }
@@ -357,6 +402,9 @@ impl<C: ManagedChild> Drop for RunningVm<C> {
 }
 
 fn prepare_plan_paths(plan: &LaunchPlan) -> Result<(), SupervisorError> {
+    fs::create_dir_all(&plan.run_dir).map_err(|source| {
+        SupervisorError::io("create run directory", Some(plan.run_dir.clone()), source)
+    })?;
     fs::create_dir_all(&plan.log_dir).map_err(|source| {
         SupervisorError::io("create log directory", Some(plan.log_dir.clone()), source)
     })?;
@@ -508,10 +556,155 @@ fn cleanup_sockets(sockets: &[PathBuf]) {
     }
 }
 
+fn cleanup_pid_files(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn pid_file_path(run_dir: &Path, label: &str) -> PathBuf {
+    run_dir.join(format!("{label}.pid"))
+}
+
+fn write_pid_file(path: &Path, pid: u32) -> io::Result<()> {
+    fs::write(path, format!("{pid}\n"))
+}
+
+pub fn stop_run_dir(run_dir: &Path, timeout: Duration) -> Result<StopReport, SupervisorError> {
+    let pid_files = pid_files_in_run_dir(run_dir)?;
+    let mut report = StopReport::default();
+
+    for pid_file in pid_files {
+        let label = pid_file
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| pid_file.display().to_string());
+        let Some(pid) = read_pid_file(&pid_file)? else {
+            let _ = fs::remove_file(&pid_file);
+            report.stale.push(label);
+            continue;
+        };
+
+        if terminate_pid(pid, timeout)
+            .map_err(|source| SupervisorError::io("stop process", Some(pid_file.clone()), source))?
+        {
+            report.terminated.push(label);
+        } else {
+            report.stale.push(label);
+        }
+
+        let _ = fs::remove_file(&pid_file);
+    }
+
+    cleanup_run_dir_sockets(run_dir)?;
+    Ok(report)
+}
+
+fn pid_files_in_run_dir(run_dir: &Path) -> Result<Vec<PathBuf>, SupervisorError> {
+    let entries = fs::read_dir(run_dir).map_err(|source| {
+        SupervisorError::io("read run directory", Some(run_dir.to_path_buf()), source)
+    })?;
+    let mut paths = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("pid"))
+        .collect::<Vec<_>>();
+    paths.sort_by_key(|path| {
+        let name = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("");
+        (name != "qemu.pid", name.to_string())
+    });
+    Ok(paths)
+}
+
+fn read_pid_file(path: &Path) -> Result<Option<u32>, SupervisorError> {
+    let contents = fs::read_to_string(path)
+        .map_err(|source| SupervisorError::io("read pid file", Some(path.to_path_buf()), source))?;
+    let pid = contents.trim();
+    if pid.is_empty() {
+        return Ok(None);
+    }
+    match pid.parse::<u32>() {
+        Ok(pid) => Ok(Some(pid)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn terminate_pid(pid: u32, timeout: Duration) -> io::Result<bool> {
+    if !send_signal(pid, libc::SIGTERM)? {
+        return Ok(false);
+    }
+
+    if wait_for_pid_exit(pid, timeout)? {
+        return Ok(true);
+    }
+
+    if send_signal(pid, libc::SIGKILL)? {
+        let _ = wait_for_pid_exit(pid, STOP_KILL_TIMEOUT)?;
+    }
+
+    Ok(true)
+}
+
+fn wait_for_pid_exit(pid: u32, timeout: Duration) -> io::Result<bool> {
+    let start = Instant::now();
+    loop {
+        if !process_exists(pid)? {
+            return Ok(true);
+        }
+        if start.elapsed() >= timeout {
+            return Ok(false);
+        }
+        thread::sleep(STOP_POLL_INTERVAL);
+    }
+}
+
+fn send_signal(pid: u32, signal: libc::c_int) -> io::Result<bool> {
+    let ret = unsafe { libc::kill(pid as i32, signal) };
+    if ret == 0 {
+        return Ok(true);
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        _ => Err(error),
+    }
+}
+
+fn process_exists(pid: u32) -> io::Result<bool> {
+    let ret = unsafe { libc::kill(pid as i32, 0) };
+    if ret == 0 {
+        return Ok(true);
+    }
+
+    let error = io::Error::last_os_error();
+    match error.raw_os_error() {
+        Some(libc::ESRCH) => Ok(false),
+        Some(libc::EPERM) => Ok(true),
+        _ => Err(error),
+    }
+}
+
+fn cleanup_run_dir_sockets(run_dir: &Path) -> Result<(), SupervisorError> {
+    let entries = fs::read_dir(run_dir).map_err(|source| {
+        SupervisorError::io("read run directory", Some(run_dir.to_path_buf()), source)
+    })?;
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.extension().and_then(|value| value.to_str()) == Some("sock") {
+            let _ = fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::process::Command;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -534,6 +727,10 @@ mod tests {
             assert_eq!(vm.qemu_id(), Some(4));
             assert_eq!(vm.virtiofsd_count(), 3);
             assert!(path_is_socket(&plan.shares[0].socket));
+            assert!(plan.run_dir.join("virtiofsd-workspace.pid").exists());
+            assert!(plan.run_dir.join("virtiofsd-cache.pid").exists());
+            assert!(plan.run_dir.join("virtiofsd-tools.pid").exists());
+            assert!(plan.run_dir.join("qemu.pid").exists());
             assert!(plan.shares[1].source.is_dir());
             assert!(plan.shares[2].source.is_dir());
             assert!(plan.log_dir.is_dir());
@@ -695,6 +892,26 @@ mod tests {
             .iter()
             .filter(|child| child.borrow().label.starts_with("virtiofsd-"));
         assert!(sidecars.into_iter().all(|child| child.borrow().killed));
+    }
+
+    #[test]
+    fn stop_run_dir_terminates_recorded_processes_and_removes_pid_files() {
+        let temp = TestDir::new("stop");
+        let mut child = Command::new("/bin/sh")
+            .arg("-lc")
+            .arg("sleep 60")
+            .spawn()
+            .unwrap();
+        fs::write(temp.path().join("qemu.pid"), format!("{}\n", child.id())).unwrap();
+
+        let report = stop_run_dir(temp.path(), Duration::ZERO).unwrap();
+
+        assert_eq!(report.terminated, vec!["qemu".to_string()]);
+        assert!(report.stale.is_empty());
+        assert!(!temp.path().join("qemu.pid").exists());
+
+        let status = child.wait().unwrap();
+        assert!(!status.success());
     }
 
     fn sample_plan(root: &Path) -> LaunchPlan {

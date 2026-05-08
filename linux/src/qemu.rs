@@ -138,6 +138,7 @@ pub struct LaunchPlan {
     pub qemu_args: Vec<String>,
     pub shares: Vec<SharePlan>,
     pub kernel_cmdline: String,
+    pub run_dir: PathBuf,
     pub log_dir: PathBuf,
 }
 
@@ -261,6 +262,7 @@ pub fn build_launch_plan(config: &LaunchConfig) -> Result<LaunchPlan, PlanError>
         qemu_args: args,
         shares,
         kernel_cmdline,
+        run_dir: config.run_dir.clone(),
         log_dir,
     })
 }
@@ -342,6 +344,7 @@ mod tests {
         let plan = build_launch_plan(&sample_config(NetworkMode::Passt)).unwrap();
 
         assert_eq!(plan.qemu_program, "qemu-system-x86_64");
+        assert_eq!(plan.run_dir, PathBuf::from("/tmp/fend run"));
         assert_eq!(plan.log_dir, PathBuf::from("/tmp/fend run/logs"));
         assert_eq!(
             plan.kernel_cmdline,

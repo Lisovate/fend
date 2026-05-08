@@ -4,13 +4,13 @@ use std::process::ExitCode;
 use fend_linux::cli::{
     build_launch_config, build_supervised_launch_config, doctor_usage, launch_usage, parse_args,
     plan_defaults_from_env, plan_usage, render_doctor_report, render_launch_plan,
-    render_launch_summary, resolve_doctor_runtime_dir, resolve_plan_runtime_dir, smoke_usage,
-    usage, CliCommand, HelpTopic,
+    render_launch_summary, resolve_doctor_runtime_dir, resolve_plan_runtime_dir,
+    resolve_stop_run_dir, smoke_usage, stop_usage, usage, CliCommand, HelpTopic,
 };
 use fend_linux::doctor;
 use fend_linux::qemu;
 use fend_linux::smoke;
-use fend_linux::supervisor::{Supervisor, SupervisorOptions};
+use fend_linux::supervisor::{stop_run_dir, Supervisor, SupervisorOptions};
 
 fn main() -> ExitCode {
     match run() {
@@ -35,6 +35,7 @@ fn run() -> Result<ExitCode, String> {
                     HelpTopic::Doctor => doctor_usage(),
                     HelpTopic::Plan => plan_usage(),
                     HelpTopic::Launch => launch_usage(),
+                    HelpTopic::Stop => stop_usage(),
                     HelpTopic::Smoke => smoke_usage(),
                 }
             );
@@ -81,6 +82,23 @@ fn run() -> Result<ExitCode, String> {
             } else {
                 Ok(ExitCode::FAILURE)
             }
+        }
+        CliCommand::Stop(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let run_dir = resolve_stop_run_dir(&options, &defaults);
+            let timeout = std::time::Duration::from_secs(options.timeout_secs.unwrap_or(3));
+            let report = stop_run_dir(&run_dir, timeout).map_err(|error| error.to_string())?;
+            println!("fend linux stop");
+            println!("  run dir    {}", run_dir.display());
+            println!("  stopped    {}", report.terminated.len());
+            println!("  stale      {}", report.stale.len());
+            if !report.terminated.is_empty() {
+                println!("  labels     {}", report.terminated.join(", "));
+            }
+            if !report.stale.is_empty() {
+                println!("  stale ids  {}", report.stale.join(", "));
+            }
+            Ok(ExitCode::SUCCESS)
         }
         CliCommand::Smoke(options) => {
             let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
