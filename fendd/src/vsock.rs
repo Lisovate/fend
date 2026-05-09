@@ -61,7 +61,11 @@ impl VsockListener {
 
     pub fn accept(&self) -> io::Result<VsockStream> {
         let client_fd = unsafe {
-            libc::accept(self.fd.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut())
+            libc::accept(
+                self.fd.as_raw_fd(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
         };
         if client_fd < 0 {
             return Err(io::Error::last_os_error());

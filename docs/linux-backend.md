@@ -13,6 +13,8 @@ As of 2026-05-08, the Linux QEMU/KVM spike has been validated on a real Arch
 x86_64 host. The repo now proves:
 
 - `fend-linux doctor` passes on Arch with distro-packaged `virtiofsd`.
+- `fend setup` prepares the Linux runtime artifacts without requiring the
+  repo-local shell builder path.
 - `fend-linux launch` boots the guest with both `--network user` and
   `--network passt`.
 - `fendd` binds vsock port `1024`, and both smoke clients execute commands in
@@ -26,13 +28,16 @@ x86_64 host. The repo now proves:
 The Linux path is still a spike, not a shipped product:
 
 - The Rust Linux crate now exposes both `fend-linux` and a Linux `fend`
-  binary, and the top-level disposable `fend <command>` path works on a real
-  host.
+  binary, the top-level disposable `fend <command>` path works on a real host,
+  and the first-run runtime bootstrap now lives in the Rust binary.
+- The disposable path now keeps long-running commands attached, forwards guest
+  ports back to `127.0.0.1`, and has been validated on a real Next.js app with
+  `fend npm run dev`.
 - That top-level path is still disposable-only; warm VM reuse and daemon-backed
   lifecycle parity are not done.
-- Runtime preparation still depends on the developer builder script and Docker.
-- Interactive TTY parity and stdin/signal/resize handling are not done.
-- Real release packaging, CI, and distro-facing setup docs are not done.
+- Runtime preparation still depends on Docker for the local rootfs build.
+- Full stdin passthrough and warm-VM interactive polish are not done.
+- Real release publishing, CI, and distro-facing setup docs are not done.
 
 ## Phase 0: Baseline Quality
 
@@ -108,9 +113,10 @@ Phase 1 spike artifacts now live in the repo:
   binary so the Rust path can render Linux doctor output, inspect the launch
   plan, and supervise the first QEMU launch path before it grows into the full
   Linux host runner. The launch path now runs its own preflight before starting
-  sidecars or QEMU; it checks only launch-time requirements, so Docker and the
-  Rust musl target remain builder concerns, and `passt` is required only for
-  `--network passt`.
+  sidecars or QEMU; it checks only launch-time requirements, so Docker remains
+  a runtime-bootstrap concern, `passt` is required only for explicit
+  `--network passt`, and the default run path falls back to QEMU `user`
+  networking when `passt` is unavailable.
 
 Runtime image architecture is now split by script. Tool download resolution is
 platform-aware, but the existing `swift/scripts/prepare-runtime.sh` still
@@ -137,8 +143,9 @@ cd ..
 scripts/prepare-linux-x86_64-runtime.sh
 ```
 
-The builder currently uses Docker to assemble the ext4 rootfs. That is a
-developer-spike dependency, not the intended end-user Linux prerequisite.
+The builder currently uses Docker to assemble the ext4 rootfs. That is still a
+temporary Linux prerequisite until published runtime bundles exist, but the
+end-user entrypoint no longer depends on a repo-local shell script.
 
 Host-independent checks that can run on macOS:
 
@@ -159,7 +166,7 @@ On a Linux host, run no-boot preflight before launching QEMU:
 ```bash
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- doctor
 cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- plan /path/to/project
-scripts/prepare-linux-x86_64-runtime.sh --check
+cargo run --manifest-path linux/Cargo.toml --bin fend-linux -- setup --help
 ```
 
 `fend-linux launch` also runs a launch-specific preflight automatically before
@@ -169,9 +176,18 @@ requires the workspace share to exist, creates cache/tool share directories when
 needed, and launches QEMU with snapshot disk writes so the reusable rootfs image
 stays disposable across smoke runs.
 
-After the builder places x86_64 `vmlinuz`, `initrd`, and `rootfs.img` in
-`~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, launch through
-the Rust Linux supervisor:
+For the current end-user path, you can let the Linux binary bootstrap the
+runtime directly:
+
+```bash
+fend doctor
+fend setup
+fend npm install
+```
+
+If you want to launch the VM explicitly after the runtime exists in
+`~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, use the Rust
+Linux supervisor directly:
 
 ```bash
 FEND_RUNTIME_DIR="$HOME/.fend/runtime/linux-x86_64" \
@@ -235,11 +251,11 @@ turning the spike into the first Linux product path.
   per-command boot.
 - Add Linux VM lifecycle management: one VM per project, reuse across commands,
   deterministic shutdown, stale-CID recovery, and orphan sidecar cleanup.
-- Close interactive command parity: TTY allocation, stdin/stdout streaming,
-  signal forwarding, window resize, and clean Ctrl-C behavior for long-running
-  commands like `npm run dev`.
-- Validate port forwarding and network event reporting on the Rust Linux path,
-  not only command execution smoke.
+- Finish interactive command parity: stdin passthrough/prompt handling,
+  long-running session polish, and any remaining TTY edge cases after the new
+  attached session path.
+- Extend the new localhost port forwarding beyond smoke validation with longer
+  soak coverage and network event reporting on the Rust Linux path.
 - Soak the current workspace/cache/tools mount model with real Node workflows
   on Arch and Ubuntu.
 
@@ -249,8 +265,9 @@ turning the spike into the first Linux product path.
   install flow.
 - Decide what ships versus what stays distro-provided: QEMU, `virtiofsd`,
   `passt`, kernel/initrd/rootfs, and tool bundles.
-- Add Linux packaging to the npm distribution story, including platform
-  selection and runtime bootstrap.
+- Turn the now-scripted Linux npm packaging path into a real release path:
+  publish `@fendsh/cli-linux-x64`, add CI for `pack-npm` / local install
+  verification, and document release order/platform support.
 - Expand `doctor` so it covers the real end-user setup path and not only the
   spike prerequisites.
 

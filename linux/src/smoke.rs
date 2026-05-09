@@ -536,16 +536,16 @@ fn set_socket_timeout(file: &std::fs::File, timeout: Duration) -> std::io::Resul
 #[cfg(target_os = "linux")]
 fn duration_to_timeval(timeout: Duration) -> libc::timeval {
     let micros = timeout.as_micros().max(1);
-    let seconds = (micros / 1_000_000).min(libc::time_t::MAX as u128);
-    let useconds = if seconds == libc::time_t::MAX as u128 {
+    let seconds = i64::try_from(micros / 1_000_000).unwrap_or(i64::MAX);
+    let useconds = if seconds == i64::MAX {
         999_999
     } else {
         micros % 1_000_000
     };
 
     libc::timeval {
-        tv_sec: seconds as libc::time_t,
-        tv_usec: useconds as libc::suseconds_t,
+        tv_sec: seconds as _,
+        tv_usec: useconds as _,
     }
 }
 

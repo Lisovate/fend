@@ -5,9 +5,12 @@
 //! and verifies guest command execution over vsock.
 
 pub mod app;
+pub mod bootstrap;
 pub mod cli;
 pub mod doctor;
 pub mod qemu;
+pub mod runtime;
+pub mod session;
 pub mod smoke;
 pub mod supervisor;
 pub mod tools;

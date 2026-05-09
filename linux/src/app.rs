@@ -2,20 +2,28 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::bootstrap;
 use crate::cli::{
-    build_launch_config, build_run_launch_config, build_run_smoke_config,
-    build_supervised_launch_config, doctor_usage, launch_usage, parse_args, plan_defaults_from_env,
-    plan_usage, render_doctor_report, render_launch_plan, render_launch_summary,
-    resolve_doctor_runtime_dir, resolve_plan_runtime_dir, resolve_stop_run_dir, run_usage,
-    smoke_usage, stop_usage, usage, CliCommand, HelpTopic,
+    build_bootstrap_options, build_launch_config, build_run_launch_config, build_run_smoke_config,
+    build_supervised_launch_config, doctor_usage_for, launch_usage_for, parse_args,
+    plan_defaults_from_env, plan_usage_for, render_doctor_report, render_launch_plan,
+    render_launch_summary, resolve_doctor_runtime_dir, resolve_plan_runtime_dir,
+    resolve_stop_run_dir, run_usage_for, setup_usage_for, smoke_usage_for, stop_usage_for,
+    usage_for, CliCommand, HelpTopic, SetupOptions,
 };
 use crate::doctor;
-use crate::qemu;
+use crate::qemu::{self, LaunchConfig, NetworkMode};
+use crate::runtime;
+use crate::session;
 use crate::smoke;
-use crate::supervisor::{stop_run_dir, Supervisor, SupervisorOptions};
+use crate::supervisor::{stop_run_dir, ProcessIo, Supervisor, SupervisorOptions};
 
 pub fn main_entry() -> ExitCode {
-    match run(std::env::args().skip(1)) {
+    main_entry_named("fend-linux")
+}
+
+pub fn main_entry_named(program: &str) -> ExitCode {
+    match run(program, std::env::args().skip(1)) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
@@ -24,25 +32,26 @@ pub fn main_entry() -> ExitCode {
     }
 }
 
-pub fn run<I, S>(args: I) -> Result<ExitCode, String>
+pub fn run<I, S>(program: &str, args: I) -> Result<ExitCode, String>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let command = parse_args(args).map_err(|error| format!("{error}\n\n{}", usage()))?;
+    let command = parse_args(args).map_err(|error| format!("{error}\n\n{}", usage_for(program)))?;
 
     match command {
         CliCommand::Help(topic) => {
             print!(
                 "{}",
                 match topic {
-                    HelpTopic::General => usage(),
-                    HelpTopic::Doctor => doctor_usage(),
-                    HelpTopic::Plan => plan_usage(),
-                    HelpTopic::Launch => launch_usage(),
-                    HelpTopic::Run => run_usage(),
-                    HelpTopic::Stop => stop_usage(),
-                    HelpTopic::Smoke => smoke_usage(),
+                    HelpTopic::General => usage_for(program),
+                    HelpTopic::Doctor => doctor_usage_for(program),
+                    HelpTopic::Setup => setup_usage_for(program),
+                    HelpTopic::Plan => plan_usage_for(program),
+                    HelpTopic::Launch => launch_usage_for(program),
+                    HelpTopic::Run => run_usage_for(program),
+                    HelpTopic::Stop => stop_usage_for(program),
+                    HelpTopic::Smoke => smoke_usage_for(program),
                 }
             );
             Ok(ExitCode::SUCCESS)
@@ -58,19 +67,53 @@ where
                 Ok(ExitCode::FAILURE)
             }
         }
+        CliCommand::Setup(options) => {
+            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+            let bootstrap = build_bootstrap_options(&options, &defaults);
+            let report = bootstrap::ensure_linux_runtime(&bootstrap)?;
+            println!("fend setup");
+            println!("  runtime    {}", bootstrap.runtime_dir.display());
+            println!("  work dir   {}", bootstrap.work_dir.display());
+            println!("  metadata   {}", report.metadata_path.display());
+            println!(
+                "  status     {}",
+                if report.bootstrapped {
+                    "prepared"
+                } else {
+                    "already ready"
+                }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
         CliCommand::Plan(options) => {
             let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
-            let config = build_launch_config(&options, &defaults);
+            let mut config = build_launch_config(&options, &defaults);
+            let probe = doctor::current_launch_probe(resolve_plan_runtime_dir(&options, &defaults));
+            if apply_network_fallback(
+                &mut config,
+                options.network.is_some() || defaults.network.is_some(),
+                &probe,
+            ) {
+                eprintln!("fend: passt not found, falling back to qemu user networking");
+            }
             let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
             print!("{}", render_launch_plan(&plan));
             Ok(ExitCode::SUCCESS)
         }
         CliCommand::Launch(options) => {
             let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
-            let config = build_supervised_launch_config(&options, &defaults);
+            ensure_bootstrap_for_launch(&options, &defaults)?;
             let runtime_dir = resolve_plan_runtime_dir(&options, &defaults);
-            let report =
-                doctor::evaluate_launch(&doctor::current_launch_probe(runtime_dir), config.network);
+            let probe = doctor::current_launch_probe(&runtime_dir);
+            let mut config = build_supervised_launch_config(&options, &defaults);
+            if apply_network_fallback(
+                &mut config,
+                options.network.is_some() || defaults.network.is_some(),
+                &probe,
+            ) {
+                eprintln!("fend: passt not found, falling back to qemu user networking");
+            }
+            let report = doctor::evaluate_launch(&probe, config.network);
             if !report.issues.is_empty() {
                 eprint!("{}", render_doctor_report(&report));
                 return Ok(ExitCode::FAILURE);
@@ -130,38 +173,61 @@ where
 
 fn run_disposable_command(options: &crate::cli::RunOptions) -> Result<ExitCode, String> {
     let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
-    let config = build_run_launch_config(options, &defaults);
-    ensure_guest_tool_available(
-        options.command.first().map(String::as_str),
-        &config.tools_dir,
-    )?;
+    let mut config = build_run_launch_config(options, &defaults);
+    let bootstrap = build_bootstrap_options(
+        &SetupOptions {
+            runtime_dir: Some(
+                config
+                    .artifacts
+                    .kernel
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
+            ),
+            work_dir: None,
+            rebuild_rootfs: false,
+            force_downloads: false,
+            skip_claude: false,
+        },
+        &defaults,
+    );
+    let _ = bootstrap::ensure_linux_runtime(&bootstrap)?;
+    let prepared =
+        runtime::prepare_guest_command(&options.command, &config.workspace, &config.tools_dir)?;
     let runtime_dir = config
         .artifacts
         .kernel
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
-    let report =
-        doctor::evaluate_launch(&doctor::current_launch_probe(runtime_dir), config.network);
+    let probe = doctor::current_launch_probe(&runtime_dir);
+    if apply_network_fallback(
+        &mut config,
+        options.vm_network.is_some() || defaults.network.is_some(),
+        &probe,
+    ) {
+        eprintln!("fend: passt not found, falling back to qemu user networking");
+    }
+    let report = doctor::evaluate_launch(&probe, config.network);
     if !report.issues.is_empty() {
         eprint!("{}", render_doctor_report(&report));
         return Ok(ExitCode::FAILURE);
     }
 
     let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
-    let mut supervisor = Supervisor::new(SupervisorOptions::default());
+    let mut supervisor = Supervisor::new(SupervisorOptions {
+        qemu_io: ProcessIo::Log(config.run_dir.join("logs/qemu.log")),
+        ..SupervisorOptions::default()
+    });
     let _vm = supervisor
         .launch_plan(&plan)
         .map_err(|error| error.to_string())?;
 
     let smoke_config = build_run_smoke_config(options, &config);
-    let result = smoke::run_smoke(&smoke_config).map_err(|error| error.to_string())?;
-    std::io::stdout()
-        .write_all(&result.stdout)
-        .map_err(|error| error.to_string())?;
-    std::io::stderr()
-        .write_all(&result.stderr)
-        .map_err(|error| error.to_string())?;
+    let mut prepared_smoke = smoke_config;
+    prepared_smoke.command = prepared.command;
+    prepared_smoke.env.extend(prepared.env);
+    let result = session::run_attached(&prepared_smoke).map_err(|error| error.to_string())?;
     Ok(exit_code_from_i32(result.exit_code))
 }
 
@@ -174,92 +240,35 @@ fn exit_code_from_i32(code: i32) -> ExitCode {
     }
 }
 
-fn ensure_guest_tool_available(command: Option<&str>, tools_dir: &Path) -> Result<(), String> {
-    let Some(command) = command else {
+fn ensure_bootstrap_for_launch(
+    options: &crate::cli::PlanOptions,
+    defaults: &crate::cli::PlanDefaults,
+) -> Result<(), String> {
+    let runtime_dir = resolve_plan_runtime_dir(options, defaults);
+    if !bootstrap::runtime_missing(&runtime_dir) {
         return Ok(());
+    }
+    let setup = SetupOptions {
+        runtime_dir: Some(runtime_dir),
+        work_dir: None,
+        rebuild_rootfs: false,
+        force_downloads: false,
+        skip_claude: false,
     };
-    if !requires_guest_tool(command) {
-        return Ok(());
-    }
-    if guest_tool_exists(tools_dir, command) {
-        return Ok(());
-    }
-
-    Err(format!(
-        "guest tool {command:?} is not available in {}. Populate ~/.fend/tools with the Linux runtime toolchain before running {command}.",
-        tools_dir.display()
-    ))
+    let bootstrap = build_bootstrap_options(&setup, defaults);
+    let _ = bootstrap::ensure_linux_runtime(&bootstrap)?;
+    Ok(())
 }
 
-fn requires_guest_tool(command: &str) -> bool {
-    if command.contains('/') {
-        return false;
-    }
-    matches!(
-        command,
-        "node" | "npm" | "npx" | "pnpm" | "pnpx" | "yarn" | "bun" | "bunx" | "claude"
-    )
-}
-
-fn guest_tool_exists(tools_dir: &Path, name: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(tools_dir) else {
-        return false;
-    };
-
-    entries
-        .flatten()
-        .any(|entry| tool_entry_contains(&entry.path(), name))
-}
-
-fn tool_entry_contains(path: &Path, name: &str) -> bool {
-    path.join("bin").join(name).exists() || path.join(name).exists()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn guest_tool_preflight_ignores_absolute_commands() {
-        assert!(!requires_guest_tool("/bin/sh"));
-    }
-
-    #[test]
-    fn guest_tool_preflight_recognizes_node_style_commands() {
-        assert!(requires_guest_tool("npm"));
-        assert!(requires_guest_tool("bun"));
-        assert!(!requires_guest_tool("git"));
-    }
-
-    #[test]
-    fn guest_tool_preflight_checks_tools_dir_layout() {
-        let temp = TempDir::new("guest-tools");
-        let node_dir = temp.path.join("node-22.0.0-linux-x64");
-        std::fs::create_dir_all(node_dir.join("bin")).unwrap();
-        std::fs::write(node_dir.join("bin/npm"), b"").unwrap();
-
-        assert!(guest_tool_exists(&temp.path, "npm"));
-        assert!(!guest_tool_exists(&temp.path, "pnpm"));
-    }
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn new(name: &str) -> Self {
-            let path =
-                PathBuf::from("/tmp").join(format!("fend-linux-app-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir_all(&path).unwrap();
-            Self { path }
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
+fn apply_network_fallback(
+    config: &mut LaunchConfig,
+    network_explicit: bool,
+    probe: &doctor::HostProbe,
+) -> bool {
+    if !network_explicit && config.network == NetworkMode::Passt && !probe.passt_available {
+        config.network = NetworkMode::User;
+        true
+    } else {
+        false
     }
 }

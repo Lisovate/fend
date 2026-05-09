@@ -74,7 +74,10 @@ fn poll_loop(state: SharedState) {
 fn event_listener(state: SharedState) {
     let listener = match VsockListener::bind(VSOCK_PORT_EVENTS) {
         Ok(l) => {
-            eprintln!("fendd: port monitor listening on vsock port {}", VSOCK_PORT_EVENTS);
+            eprintln!(
+                "fendd: port monitor listening on vsock port {}",
+                VSOCK_PORT_EVENTS
+            );
             l
         }
         Err(e) => {
@@ -149,8 +152,8 @@ fn send_port_event(stream: &mut VsockStream, port: u16, event: &str) -> std::io:
         port,
         event: event.to_string(),
     };
-    let json = serde_json::to_vec(&msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json =
+        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     write_frame(stream, MessageType::PortEvent, &json)
 }
 
@@ -167,7 +170,8 @@ mod tests {
 
     #[test]
     fn test_parse_listening_ports_non_listen() {
-        let content = "  sl  local_address rem_address   st\n   0: 00000000:0050 00000000:0000 01\n";
+        let content =
+            "  sl  local_address rem_address   st\n   0: 00000000:0050 00000000:0000 01\n";
         let ports = parse_listening_ports(content);
         assert!(ports.is_empty());
     }

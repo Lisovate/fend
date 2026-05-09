@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::bootstrap::{default_work_dir, BootstrapOptions};
 use crate::doctor::DoctorReport;
 use crate::qemu::{LaunchConfig, LaunchPlan, NetworkMode, RuntimeArtifacts};
 use crate::smoke::{
@@ -16,6 +17,7 @@ use crate::tools::resolve_virtiofsd;
 pub enum CliCommand {
     Help(HelpTopic),
     Doctor(DoctorOptions),
+    Setup(SetupOptions),
     Plan(PlanOptions),
     Launch(PlanOptions),
     Run(RunOptions),
@@ -27,6 +29,7 @@ pub enum CliCommand {
 pub enum HelpTopic {
     General,
     Doctor,
+    Setup,
     Plan,
     Launch,
     Run,
@@ -37,6 +40,15 @@ pub enum HelpTopic {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DoctorOptions {
     pub runtime_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SetupOptions {
+    pub runtime_dir: Option<PathBuf>,
+    pub work_dir: Option<PathBuf>,
+    pub rebuild_rootfs: bool,
+    pub force_downloads: bool,
+    pub skip_claude: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -201,32 +213,84 @@ impl fmt::Display for CliError {
 
 impl std::error::Error for CliError {}
 
-pub fn usage() -> &'static str {
-    "usage: fend-linux <subcommand> [options]\n       fend-linux [run options] -- <command> [args...]\n       fend-linux [run options] <command> [args...]\n\nsubcommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  run         Launch a disposable VM, run one command, and tear it down.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nIf no subcommand is given, fend-linux treats the remaining arguments as a sandboxed command to run.\n"
+pub fn usage() -> String {
+    usage_for("fend-linux")
 }
 
-pub fn doctor_usage() -> &'static str {
-    "usage: fend-linux doctor [--runtime-dir path]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n                         Default: $FEND_RUNTIME_DIR or $FEND_HOME/runtime/linux-x86_64.\n"
+pub fn usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} <subcommand> [options]\n       {program} [run options] -- <command> [args...]\n       {program} [run options] <command> [args...]\n\nsubcommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  setup       Prepare Linux runtime artifacts in ~/.fend/runtime.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  run         Launch a disposable VM, run one command, and tear it down.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nIf no subcommand is given, {program} treats the remaining arguments as a sandboxed command to run.\n"
+    )
 }
 
-pub fn plan_usage() -> &'static str {
-    "usage: fend-linux plan [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+pub fn doctor_usage() -> String {
+    doctor_usage_for("fend-linux")
 }
 
-pub fn launch_usage() -> &'static str {
-    "usage: fend-linux launch [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+pub fn doctor_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} doctor [--runtime-dir path]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n                         Default: $FEND_RUNTIME_DIR or $FEND_HOME/runtime/linux-x86_64.\n"
+    )
 }
 
-pub fn run_usage() -> &'static str {
-    "usage: fend-linux run [options] -- <command> [args...]\n       fend-linux [options] <command> [args...]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory to mount. Default: current directory.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --vm-network mode      passt, user, or off. Default: passt.\n  --network mode         Command network policy: on or off. Default: on.\n  --timeout sec          Wait for fendd / command completion. Default: 30.\n  --cwd path             Guest working directory. Default: /workspace.\n  --env KEY=VALUE        Extra environment variable for the guest command.\n\nThis path is disposable: it boots a VM, runs one command, streams output, and tears the VM down.\n"
+pub fn setup_usage() -> String {
+    setup_usage_for("fend-linux")
 }
 
-pub fn stop_usage() -> &'static str {
-    "usage: fend-linux stop [options]\n\noptions:\n  --run-dir path         Directory containing qemu.pid and virtiofsd pid files.\n                         Default: $FEND_RUN_DIR or /tmp/fend-linux.\n  --timeout sec          Grace period before SIGKILL. Default: 3.\n\nIf launch used an autogenerated run dir, pass the path printed in launch output.\n"
+pub fn setup_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} setup [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --work-dir path        Temporary work dir for downloads and Docker build context.\n  --rebuild-rootfs       Rebuild rootfs.img even if it already exists.\n  --force-downloads      Re-download kernel/initrd even if they already exist.\n  --skip-claude          Skip the optional Claude guest tool download.\n\nThis is usually automatic on first run; use it when you want to prewarm or debug Linux setup.\n"
+    )
 }
 
-pub fn smoke_usage() -> &'static str {
-    "usage: fend-linux smoke [options] [-- command [args...]]\n\noptions:\n  --cid n          Guest vsock CID. Default: $FEND_QEMU_CID or 42.\n  --port n         fendd command vsock port. Default: 1024.\n  --timeout sec    Wait for fendd to become reachable. Default: 30.\n  --cwd path       Guest working directory. Default: /workspace.\n  --env KEY=VALUE  Extra environment variable for the smoke command.\n\nIf command is omitted, fend-linux runs: /bin/echo fend-linux-ok\n"
+pub fn plan_usage() -> String {
+    plan_usage_for("fend-linux")
+}
+
+pub fn plan_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} plan [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+    )
+}
+
+pub fn launch_usage() -> String {
+    launch_usage_for("fend-linux")
+}
+
+pub fn launch_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} launch [workspace] [options]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory. Positional workspace is also accepted.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: 42.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --network mode         passt, user, or off. Default: passt.\n  --epoch n              Epoch value passed to the guest.\n  --guest-workspace path Guest workspace path. Default: /workspace.\n"
+    )
+}
+
+pub fn run_usage() -> String {
+    run_usage_for("fend-linux")
+}
+
+pub fn run_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} run [options] -- <command> [args...]\n       {program} [options] <command> [args...]\n\noptions:\n  --runtime-dir path     Runtime dir containing vmlinuz, initrd, rootfs.img.\n  --workspace path       Host project directory to mount. Default: current directory.\n  --cache-dir path       Host package-manager cache mount.\n  --tools-dir path       Host tool cache mount.\n  --run-dir path         Directory for QEMU and virtiofsd sockets/logs.\n  --cid n                Guest vsock CID. Default: autogenerated per run.\n  --cpus n               vCPU count. Default: 2.\n  --memory-mib n         Memory in MiB. Default: 2048.\n  --vm-network mode      passt, user, or off. Default: passt.\n  --network mode         Command network policy: on or off. Default: on.\n  --timeout sec          Wait for fendd session startup. Default: 30.\n  --cwd path             Guest working directory. Default: /workspace.\n  --env KEY=VALUE        Extra environment variable for the guest command.\n\nThis path is disposable: it boots a VM, runs one command with live output, forwards guest ports to localhost, and tears the VM down when the command exits.\n"
+    )
+}
+
+pub fn stop_usage() -> String {
+    stop_usage_for("fend-linux")
+}
+
+pub fn stop_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} stop [options]\n\noptions:\n  --run-dir path         Directory containing qemu.pid and virtiofsd pid files.\n                         Default: $FEND_RUN_DIR or /tmp/fend-linux.\n  --timeout sec          Grace period before SIGKILL. Default: 3.\n\nIf launch used an autogenerated run dir, pass the path printed in launch output.\n"
+    )
+}
+
+pub fn smoke_usage() -> String {
+    smoke_usage_for("fend-linux")
+}
+
+pub fn smoke_usage_for(program: &str) -> String {
+    format!(
+        "usage: {program} smoke [options] [-- command [args...]]\n\noptions:\n  --cid n          Guest vsock CID. Default: $FEND_QEMU_CID or 42.\n  --port n         fendd command vsock port. Default: 1024.\n  --timeout sec    Wait for fendd to become reachable. Default: 30.\n  --cwd path       Guest working directory. Default: /workspace.\n  --env KEY=VALUE  Extra environment variable for the smoke command.\n\nIf command is omitted, {program} runs: /bin/echo fend-linux-ok\n"
+    )
 }
 
 pub fn parse_args<I, S>(args: I) -> Result<CliCommand, CliError>
@@ -242,6 +306,7 @@ where
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(CliCommand::Help(HelpTopic::General)),
         "doctor" => parse_doctor(args),
+        "setup" => parse_setup(args),
         "plan" => parse_plan(args),
         "launch" => parse_launch(args),
         "run" => parse_run(args),
@@ -285,6 +350,38 @@ pub fn resolve_doctor_runtime_dir(options: &DoctorOptions, defaults: &PlanDefaul
         .clone()
         .or_else(|| defaults.runtime_dir.clone())
         .unwrap_or_else(|| default_runtime_dir(defaults))
+}
+
+pub fn resolve_setup_runtime_dir(options: &SetupOptions, defaults: &PlanDefaults) -> PathBuf {
+    options
+        .runtime_dir
+        .clone()
+        .or_else(|| defaults.runtime_dir.clone())
+        .unwrap_or_else(|| default_runtime_dir(defaults))
+}
+
+pub fn build_bootstrap_options(
+    options: &SetupOptions,
+    defaults: &PlanDefaults,
+) -> BootstrapOptions {
+    let runtime_dir = resolve_setup_runtime_dir(options, defaults);
+    let tools_dir = defaults
+        .tools_dir
+        .clone()
+        .unwrap_or_else(|| defaults.fend_home.join("tools"));
+
+    BootstrapOptions {
+        runtime_dir,
+        work_dir: options
+            .work_dir
+            .clone()
+            .unwrap_or_else(|| default_work_dir(&defaults.fend_home)),
+        tools_dir,
+        rebuild_rootfs: options.rebuild_rootfs,
+        force_downloads: options.force_downloads,
+        skip_claude: options.skip_claude,
+        verbose: true,
+    }
 }
 
 pub fn resolve_plan_runtime_dir(options: &PlanOptions, defaults: &PlanDefaults) -> PathBuf {
@@ -375,7 +472,21 @@ pub fn build_run_launch_config(options: &RunOptions, defaults: &PlanDefaults) ->
         epoch: None,
         guest_workspace: "/workspace".to_string(),
     };
-    build_supervised_launch_config(&plan_options, defaults)
+    let mut config = build_supervised_launch_config(&plan_options, defaults);
+    if options.guest_cid.is_none() && defaults.guest_cid.is_none() {
+        config.guest_cid = autogenerated_guest_cid(defaults.epoch, std::process::id());
+    }
+    config
+}
+
+fn autogenerated_guest_cid(epoch: i64, pid: u32) -> u32 {
+    const BASE: u32 = 10_000;
+    const SPAN: u32 = 50_000;
+
+    let seed = (epoch as u64)
+        .wrapping_mul(1_103_515_245)
+        .wrapping_add(pid as u64);
+    BASE + (seed % SPAN as u64) as u32
 }
 
 pub fn build_run_smoke_config(options: &RunOptions, config: &LaunchConfig) -> SmokeConfig {
@@ -524,6 +635,23 @@ fn parse_doctor(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
         }
     }
     Ok(CliCommand::Doctor(options))
+}
+
+fn parse_setup(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
+    let mut options = SetupOptions::default();
+    while let Some(arg) = args.pop_front() {
+        match arg.as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Setup)),
+            "--runtime-dir" => options.runtime_dir = Some(value_path(&mut args, "--runtime-dir")?),
+            "--work-dir" => options.work_dir = Some(value_path(&mut args, "--work-dir")?),
+            "--rebuild-rootfs" => options.rebuild_rootfs = true,
+            "--force-downloads" => options.force_downloads = true,
+            "--skip-claude" => options.skip_claude = true,
+            other if other.starts_with('-') => return Err(CliError::UnknownOption(arg)),
+            _ => return Err(CliError::UnexpectedArgument(arg)),
+        }
+    }
+    Ok(CliCommand::Setup(options))
 }
 
 fn parse_plan(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
@@ -1075,6 +1203,10 @@ mod tests {
 
         assert_eq!(launch.workspace, PathBuf::from("/repo/app"));
         assert_eq!(launch.network, NetworkMode::User);
+        assert_eq!(
+            launch.guest_cid,
+            autogenerated_guest_cid(defaults.epoch, std::process::id())
+        );
         assert_eq!(smoke.timeout, Duration::from_secs(7));
         assert_eq!(smoke.cwd, "/workspace");
         assert_eq!(smoke.env.get("KEY").map(String::as_str), Some("VALUE"));
@@ -1090,6 +1222,10 @@ mod tests {
         let report = crate::doctor::evaluate(&HostProbe {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
+            distribution: Some(crate::doctor::DistributionInfo {
+                id: "arch".to_string(),
+                version_id: None,
+            }),
             runtime_dir: PathBuf::from("/runtime"),
             kernel_exists: false,
             initrd_exists: true,
@@ -1102,8 +1238,9 @@ mod tests {
             subuid_configured: None,
             subgid_configured: None,
             passt_available: false,
+            curl_available: true,
+            strings_available: true,
             docker_available: true,
-            rust_musl_target_installed: true,
             kvm: DeviceStatus {
                 path: PathBuf::from("/dev/kvm"),
                 exists: true,
@@ -1123,9 +1260,8 @@ mod tests {
 
         assert!(rendered.contains("fend linux doctor"));
         assert!(rendered.contains("passt"));
-        assert!(rendered.contains("Install passt"));
-        assert!(!rendered.contains("Run scripts/prepare-linux_x86_64-runtime.sh"));
-        assert!(rendered.contains("Run scripts/prepare-linux-x86_64-runtime.sh"));
+        assert!(!rendered.contains("Install passt"));
+        assert!(rendered.contains("Run `fend setup` to prepare Linux runtime artifacts."));
     }
 
     #[test]

@@ -9,7 +9,7 @@ const fs = require("fs");
 const path = require("path");
 
 const target = `${process.platform}-${process.arch}`;
-const PACKAGED = ["darwin-arm64"];
+const PACKAGED = ["darwin-arm64", "linux-x64"];
 
 const pkg = `@fendsh/cli-${target}`;
 
@@ -56,6 +56,10 @@ if (!binary) {
   console.error(`fend: native binary for ${target} is missing.`);
   console.error(`If you installed via npm, optional deps may have been skipped:`);
   console.error(`  npm install ${pkg}`);
+  if (target === "linux-x64") {
+    console.error(`For local packaging tests, stage the Linux binaries with:`);
+    console.error(`  ./scripts/build-linux-binary.sh`);
+  }
   process.exit(1);
 }
 

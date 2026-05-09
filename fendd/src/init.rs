@@ -389,6 +389,7 @@ fn setup_environment() {
         std::fs::create_dir_all("/home/user/.local/bin").ok();
         std::os::unix::fs::symlink(claude_path, "/home/user/.local/bin/claude").ok();
     }
+    std::fs::create_dir_all("/home/user/.cache").ok();
 
     chown_recursive("/home/user", 1000, 1000);
 
@@ -407,6 +408,7 @@ fn setup_environment() {
             "--install-directory",
             "/usr/local/bin",
         ]);
+        chown_recursive("/home/user", 1000, 1000);
     }
 }
 

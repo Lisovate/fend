@@ -24,9 +24,9 @@ pub enum SpawnResult {
 
 /// Spawn a command in pipe mode (separate stdout/stderr streams).
 pub fn spawn(writer: &Arc<Mutex<VsockStream>>, cmd: &ExecuteCommand) -> Result<SpawnResult, ()> {
-    let env = build_env(cmd);
-    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
     let (target_uid, target_gid) = resolve_command_identity(&cmd.cwd);
+    let env = build_env(cmd, target_uid);
+    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     let child = unsafe {
         Command::new(&cmd.cmd)
@@ -92,9 +92,9 @@ pub fn spawn_pty(
     writer: &Arc<Mutex<VsockStream>>,
     cmd: &ExecuteCommand,
 ) -> Result<SpawnResult, ()> {
-    let env = build_env(cmd);
-    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
     let (target_uid, target_gid) = resolve_command_identity(&cmd.cwd);
+    let env = build_env(cmd, target_uid);
+    let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     // Allocate PTY
     let mut master: libc::c_int = 0;
@@ -292,17 +292,33 @@ fn apply_network_policy(_network_mode: Option<&str>) -> Result<(), std::io::Erro
     Ok(())
 }
 
-fn build_env(cmd: &ExecuteCommand) -> std::collections::HashMap<String, String> {
+fn build_env(cmd: &ExecuteCommand, target_uid: u32) -> std::collections::HashMap<String, String> {
     let mut env = cmd.env.clone();
-    let path = format!(
-        "/home/user/.local/bin:{}",
-        std::env::var("PATH").unwrap_or_default()
-    );
+    let mut path_entries = Vec::new();
+    if let Some(prepend) = env
+        .remove("FEND_TOOL_PATH_PREPEND")
+        .filter(|value| !value.is_empty())
+    {
+        path_entries.push(prepend);
+    }
+    path_entries.push("/home/user/.local/bin".to_string());
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    if !inherited_path.is_empty() {
+        path_entries.push(inherited_path);
+    }
+    let path = path_entries.join(":");
+    let (home, user, npm_cache) = if target_uid == 0 {
+        ("/root", "root", "/root/.npm")
+    } else {
+        ("/home/user", "user", "/home/user/.npm")
+    };
     env.insert("PATH".to_string(), path);
-    env.insert("HOME".to_string(), "/home/user".to_string());
-    env.insert("USER".to_string(), "user".to_string());
+    env.insert("HOME".to_string(), home.to_string());
+    env.insert("USER".to_string(), user.to_string());
     env.entry("NPM_CONFIG_CACHE".to_string())
-        .or_insert_with(|| "/home/user/.npm".to_string());
+        .or_insert_with(|| npm_cache.to_string());
+    env.entry("COREPACK_HOME".to_string())
+        .or_insert_with(|| format!("{home}/.cache/node/corepack"));
     if cmd.tty {
         env.insert(
             "TERM".to_string(),
@@ -375,11 +391,15 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert!(env.get("PATH").unwrap().contains("/home/user/.local/bin"));
         assert_eq!(env.get("HOME").unwrap(), "/home/user");
         assert_eq!(env.get("USER").unwrap(), "user");
         assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/home/user/.npm");
+        assert_eq!(
+            env.get("COREPACK_HOME").unwrap(),
+            "/home/user/.cache/node/corepack"
+        );
     }
 
     #[test]
@@ -394,8 +414,30 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("MY_VAR").unwrap(), "my_value");
+    }
+
+    #[test]
+    fn test_build_env_prepends_selected_tool_path() {
+        let mut cmd_env = HashMap::new();
+        cmd_env.insert(
+            "FEND_TOOL_PATH_PREPEND".to_string(),
+            "/opt/tools/node-22.11.0-linux-x64/bin".to_string(),
+        );
+        let cmd = ExecuteCommand {
+            id: 1,
+            cmd: "test".to_string(),
+            args: vec![],
+            env: cmd_env,
+            cwd: "/tmp".to_string(),
+            tty: false,
+        };
+
+        let env = build_env(&cmd, 1000);
+        let path = env.get("PATH").unwrap();
+        assert!(path.starts_with("/opt/tools/node-22.11.0-linux-x64/bin:/home/user/.local/bin:"));
+        assert!(!env.contains_key("FEND_TOOL_PATH_PREPEND"));
     }
 
     #[test]
@@ -410,7 +452,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/tmp/npm-cache");
     }
 
@@ -424,7 +466,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: true,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("TERM").unwrap(), "xterm-256color");
     }
 
@@ -440,7 +482,27 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: true,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("TERM").unwrap(), "screen-256color");
+    }
+
+    #[test]
+    fn test_build_env_uses_root_home_for_root_identity() {
+        let cmd = ExecuteCommand {
+            id: 1,
+            cmd: "test".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: "/tmp".to_string(),
+            tty: false,
+        };
+        let env = build_env(&cmd, 0);
+        assert_eq!(env.get("HOME").unwrap(), "/root");
+        assert_eq!(env.get("USER").unwrap(), "root");
+        assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/root/.npm");
+        assert_eq!(
+            env.get("COREPACK_HOME").unwrap(),
+            "/root/.cache/node/corepack"
+        );
     }
 }

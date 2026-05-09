@@ -64,6 +64,7 @@ pub trait ProcessSpawner {
 pub struct SupervisorOptions {
     pub socket_timeout: Duration,
     pub poll_interval: Duration,
+    pub qemu_io: ProcessIo,
 }
 
 impl Default for SupervisorOptions {
@@ -71,6 +72,7 @@ impl Default for SupervisorOptions {
         Self {
             socket_timeout: Duration::from_secs(10),
             poll_interval: Duration::from_millis(100),
+            qemu_io: ProcessIo::Inherit,
         }
     }
 }
@@ -315,7 +317,7 @@ impl<S: ProcessSpawner> Supervisor<S> {
             label: "qemu".to_string(),
             program: plan.qemu_program.to_string(),
             args: plan.qemu_args.clone(),
-            io: ProcessIo::Inherit,
+            io: self.options.qemu_io.clone(),
         };
         let qemu = match self.spawner.spawn(&qemu_spec) {
             Ok(child) => child,
@@ -932,6 +934,7 @@ mod tests {
         SupervisorOptions {
             socket_timeout: Duration::ZERO,
             poll_interval: Duration::ZERO,
+            qemu_io: ProcessIo::Inherit,
         }
     }
 

@@ -50,12 +50,12 @@ pub fn handle(conn: VsockStream) {
     };
 
     let (pid, waiter, mut child_stdin, master_fd) = match result {
-        Ok(process::SpawnResult::Piped { pid, stdin, waiter }) => {
-            (pid, waiter, stdin, None)
-        }
-        Ok(process::SpawnResult::Pty { pid, master_fd, waiter }) => {
-            (pid, waiter, None, Some(master_fd))
-        }
+        Ok(process::SpawnResult::Piped { pid, stdin, waiter }) => (pid, waiter, stdin, None),
+        Ok(process::SpawnResult::Pty {
+            pid,
+            master_fd,
+            waiter,
+        }) => (pid, waiter, None, Some(master_fd)),
         Err(()) => return,
     };
     let command_id = cmd.id;
@@ -119,14 +119,19 @@ pub fn handle(conn: VsockStream) {
                 }
             }
             _ => {
-                eprintln!("fendd: unexpected message type {:?} during execution", msg_type);
+                eprintln!(
+                    "fendd: unexpected message type {:?} during execution",
+                    msg_type
+                );
             }
         }
     }
 
     drop(child_stdin);
     if let Some(fd) = master_fd {
-        unsafe { libc::close(fd); }
+        unsafe {
+            libc::close(fd);
+        }
     }
 
     waiter.join().ok();
