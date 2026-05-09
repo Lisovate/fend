@@ -42,8 +42,53 @@ fn mount(source: &str, target: &str, fstype: &str) {
         eprintln!("fendd: mounted {} ({})", target, fstype);
     } else {
         let err = std::io::Error::last_os_error();
-        eprintln!("fendd: mount {} failed: {}", target, err);
+        if err.raw_os_error() == Some(libc::EBUSY)
+            && current_mount_fstype(target).as_deref() == Some(fstype)
+        {
+            eprintln!("fendd: {} already mounted ({})", target, fstype);
+        } else {
+            eprintln!("fendd: mount {} failed: {}", target, err);
+        }
     }
+}
+
+fn current_mount_fstype(target: &str) -> Option<String> {
+    let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
+    mount_fstype_from_proc_mounts(&mounts, target)
+}
+
+fn mount_fstype_from_proc_mounts(mounts: &str, target: &str) -> Option<String> {
+    mounts.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let _source = fields.next()?;
+        let mount_point = unescape_mount_field(fields.next()?);
+        let fstype = fields.next()?;
+        (mount_point == target).then(|| fstype.to_string())
+    })
+}
+
+fn unescape_mount_field(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let octal = &value[index + 1..index + 4];
+            if octal.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+                if let Ok(decoded) = u8::from_str_radix(octal, 8) {
+                    output.push(decoded as char);
+                    index += 4;
+                    continue;
+                }
+            }
+        }
+
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+
+    output
 }
 
 fn set_clock_from_cmdline() {
@@ -63,7 +108,10 @@ fn set_clock_from_cmdline() {
                 if ret == 0 {
                     eprintln!("fendd: clock set to epoch {}", epoch);
                 } else {
-                    eprintln!("fendd: settimeofday failed: {}", std::io::Error::last_os_error());
+                    eprintln!(
+                        "fendd: settimeofday failed: {}",
+                        std::io::Error::last_os_error()
+                    );
                 }
             }
         }
@@ -97,11 +145,46 @@ fn load_modules() {
         "vmw_vsock_virtio_transport_common",
         "vmw_vsock_virtio_transport",
     ] {
-        let path = format!("/lib/modules/{}.ko", name);
-        if std::path::Path::new(&path).exists() {
-            load_module(&path, name);
+        if !modprobe_module(name) {
+            let path = format!("/lib/modules/{}.ko", name);
+            if std::path::Path::new(&path).exists() {
+                load_module(&path, name);
+            }
         }
     }
+}
+
+fn modprobe_module(name: &str) -> bool {
+    let Some(modprobe) = ["/usr/sbin/modprobe", "/sbin/modprobe", "/bin/modprobe"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).exists())
+    else {
+        return false;
+    };
+
+    let output = match std::process::Command::new(modprobe).arg(name).output() {
+        Ok(output) => output,
+        Err(error) => {
+            eprintln!("fendd: modprobe {} failed: {}", name, error);
+            return true;
+        }
+    };
+
+    if output.status.success() {
+        eprintln!("fendd: loaded {}", name);
+        return true;
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.trim().is_empty() {
+        eprintln!(
+            "fendd: modprobe {} failed with status {}",
+            name, output.status
+        );
+    } else {
+        eprintln!("fendd: modprobe {} failed: {}", name, stderr.trim());
+    }
+    true
 }
 
 fn load_module(path: &str, name: &str) {
@@ -201,22 +284,71 @@ fn bind_mount_readonly(path: &str) {
 
 fn setup_networking() {
     run_quiet(&["/bin/ip", "link", "set", "lo", "up"]);
-    run_quiet(&["/bin/ip", "link", "set", "eth0", "up"]);
+    let Some(interface) = primary_network_interface() else {
+        eprintln!("fendd: no non-loopback network interface found");
+        return;
+    };
+
+    eprintln!("fendd: configuring network on {}", interface);
+    run_quiet(&["/bin/ip", "link", "set", interface.as_str(), "up"]);
 
     if std::path::Path::new("/sbin/dhclient").exists() {
-        std::process::Command::new("/sbin/dhclient")
-            .args(["-1", "-q", "eth0"])
+        match std::process::Command::new("/sbin/dhclient")
+            .args(["-1", "-q", interface.as_str()])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok();
+        {
+            Ok(_) => eprintln!("fendd: started dhclient on {}", interface),
+            Err(error) => eprintln!("fendd: dhclient {} failed: {}", interface, error),
+        }
     } else if std::path::Path::new("/bin/udhcpc").exists() {
-        std::process::Command::new("/bin/udhcpc")
-            .args(["-i", "eth0", "-q", "-s", "/bin/simple_dhcp.sh"])
+        match std::process::Command::new("/bin/udhcpc")
+            .args(["-i", interface.as_str(), "-q", "-s", "/bin/simple_dhcp.sh"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .ok();
+        {
+            Ok(_) => eprintln!("fendd: started udhcpc on {}", interface),
+            Err(error) => eprintln!("fendd: udhcpc {} failed: {}", interface, error),
+        }
+    } else {
+        eprintln!("fendd: no DHCP client available for {}", interface);
+    }
+}
+
+fn primary_network_interface() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/net").ok()?;
+    let names = entries.flatten().filter_map(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    });
+
+    select_primary_network_interface(names)
+}
+
+fn select_primary_network_interface(
+    names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Option<String> {
+    let mut candidates = names
+        .into_iter()
+        .map(|name| name.as_ref().trim().to_string())
+        .filter(|name| !name.is_empty() && name != "lo")
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|name| (network_interface_priority(name), name.clone()));
+    candidates.into_iter().next()
+}
+
+fn network_interface_priority(name: &str) -> u8 {
+    if name.starts_with("en") || name.starts_with("eth") {
+        0
+    } else if name.starts_with("wl") || name.starts_with("ww") {
+        1
+    } else {
+        2
     }
 }
 
@@ -229,7 +361,11 @@ fn setup_environment() {
         Err(_) => true,
     };
     if needs_user {
-        std::fs::write("/etc/passwd", "root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000::/home/user:/bin/bash\n").ok();
+        std::fs::write(
+            "/etc/passwd",
+            "root:x:0:0:root:/root:/bin/sh\nuser:x:1000:1000::/home/user:/bin/bash\n",
+        )
+        .ok();
         std::fs::write("/etc/group", "root:x:0:\nuser:x:1000:\n").ok();
     }
 
@@ -238,15 +374,22 @@ fn setup_environment() {
         Err(_) => true,
     };
     if needs_hosts {
-        std::fs::write("/etc/hosts", "127.0.0.1 localhost fend\n::1 localhost ip6-localhost ip6-loopback\n").ok();
+        std::fs::write(
+            "/etc/hosts",
+            "127.0.0.1 localhost fend\n::1 localhost ip6-localhost ip6-loopback\n",
+        )
+        .ok();
     }
 
-    unsafe { libc::chmod(CString::new("/tmp").unwrap().as_ptr(), 0o1777); }
+    unsafe {
+        libc::chmod(CString::new("/tmp").unwrap().as_ptr(), 0o1777);
+    }
 
     if let Some(claude_path) = find_claude_bin() {
         std::fs::create_dir_all("/home/user/.local/bin").ok();
         std::os::unix::fs::symlink(claude_path, "/home/user/.local/bin/claude").ok();
     }
+    std::fs::create_dir_all("/home/user/.cache").ok();
 
     chown_recursive("/home/user", 1000, 1000);
 
@@ -259,7 +402,13 @@ fn setup_environment() {
     let corepack = find_tool_bin("corepack");
     if let Some(corepack_path) = corepack {
         std::fs::create_dir_all("/usr/local/bin").ok();
-        run_quiet(&[&corepack_path, "enable", "--install-directory", "/usr/local/bin"]);
+        run_quiet(&[
+            &corepack_path,
+            "enable",
+            "--install-directory",
+            "/usr/local/bin",
+        ]);
+        chown_recursive("/home/user", 1000, 1000);
     }
 }
 
@@ -338,7 +487,9 @@ fn chown_recursive(path: &str, uid: u32, gid: u32) {
         Ok(p) => p,
         Err(_) => return,
     };
-    unsafe { libc::chown(c_path.as_ptr(), uid, gid); }
+    unsafe {
+        libc::chown(c_path.as_ptr(), uid, gid);
+    }
 
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
@@ -347,7 +498,9 @@ fn chown_recursive(path: &str, uid: u32, gid: u32) {
             if p.is_dir() {
                 chown_recursive(&ps, uid, gid);
             } else if let Ok(cp) = CString::new(ps.as_str()) {
-                unsafe { libc::chown(cp.as_ptr(), uid, gid); }
+                unsafe {
+                    libc::chown(cp.as_ptr(), uid, gid);
+                }
             }
         }
     }
@@ -375,4 +528,56 @@ pub fn exec_shell() {
     };
     let err = std::process::Command::new(shell).exec();
     eprintln!("fendd: exec shell failed: {}", err);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_mount_type_for_existing_mount_point() {
+        let mounts = "\
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n\
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n\
+devtmpfs /dev devtmpfs rw,nosuid,size=1234k,nr_inodes=1,mode=755,inode64 0 0\n";
+
+        assert_eq!(
+            mount_fstype_from_proc_mounts(mounts, "/sys").as_deref(),
+            Some("sysfs")
+        );
+        assert_eq!(
+            mount_fstype_from_proc_mounts(mounts, "/dev").as_deref(),
+            Some("devtmpfs")
+        );
+    }
+
+    #[test]
+    fn decodes_escaped_mount_points() {
+        let mounts = "workspace /workspace\\040dir virtiofs rw,relatime 0 0\n";
+
+        assert_eq!(
+            mount_fstype_from_proc_mounts(mounts, "/workspace dir").as_deref(),
+            Some("virtiofs")
+        );
+    }
+
+    #[test]
+    fn picks_first_non_loopback_network_interface() {
+        let names = ["lo", "enp0s6", "docker0"];
+
+        assert_eq!(
+            select_primary_network_interface(names.iter().copied()),
+            Some("enp0s6".to_string())
+        );
+    }
+
+    #[test]
+    fn returns_none_when_only_loopback_exists() {
+        let names = ["lo"];
+
+        assert_eq!(
+            select_primary_network_interface(names.iter().copied()),
+            None
+        );
+    }
 }

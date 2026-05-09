@@ -10,7 +10,10 @@ pub fn start() {
     std::thread::spawn(|| {
         let listener = match VsockListener::bind(VSOCK_PORT_FORWARD) {
             Ok(l) => {
-                eprintln!("fendd: port forward listening on vsock port {}", VSOCK_PORT_FORWARD);
+                eprintln!(
+                    "fendd: port forward listening on vsock port {}",
+                    VSOCK_PORT_FORWARD
+                );
                 l
             }
             Err(e) => {
@@ -47,7 +50,10 @@ fn handle_forward(mut vsock: crate::vsock::VsockStream) {
     let tcp = match TcpStream::connect(("127.0.0.1", target_port)) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("fendd: forward connect to port {} failed: {}", target_port, e);
+            eprintln!(
+                "fendd: forward connect to port {} failed: {}",
+                target_port, e
+            );
             return;
         }
     };

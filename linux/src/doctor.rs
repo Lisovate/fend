@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::qemu::{NetworkMode, RuntimeArtifacts};
+use crate::tools::{resolve_virtiofsd, ResolvedVirtiofsd};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceStatus {
@@ -29,15 +30,20 @@ impl DeviceStatus {
 pub struct HostProbe {
     pub os: String,
     pub arch: String,
+    pub distribution: Option<DistributionInfo>,
     pub runtime_dir: PathBuf,
     pub kernel_exists: bool,
     pub initrd_exists: bool,
     pub rootfs_exists: bool,
     pub qemu_available: bool,
-    pub virtiofsd_available: bool,
+    pub virtiofsd: Option<ResolvedVirtiofsd>,
+    pub unshare_available: bool,
+    pub subuid_configured: Option<bool>,
+    pub subgid_configured: Option<bool>,
     pub passt_available: bool,
+    pub curl_available: bool,
+    pub strings_available: bool,
     pub docker_available: bool,
-    pub rust_musl_target_installed: bool,
     pub kvm: DeviceStatus,
     pub vhost_vsock: DeviceStatus,
     pub cpu_virtualization_available: Option<bool>,
@@ -49,6 +55,12 @@ pub struct DoctorReport {
     pub ok_message: &'static str,
     pub fields: Vec<(String, String)>,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributionInfo {
+    pub id: String,
+    pub version_id: Option<String>,
 }
 
 pub fn current_probe(runtime_dir: impl AsRef<Path>) -> HostProbe {
@@ -65,20 +77,29 @@ fn current_probe_with_builder_checks(
 ) -> HostProbe {
     let runtime_dir = runtime_dir.as_ref().to_path_buf();
     let artifacts = RuntimeArtifacts::from_runtime_dir(&runtime_dir);
+    let virtiofsd = resolve_virtiofsd();
+    let rootless_virtiofsd = virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false);
 
     HostProbe {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
+        distribution: distribution_info(),
         runtime_dir,
         kernel_exists: artifacts.kernel.is_file(),
         initrd_exists: artifacts.initrd.is_file(),
         rootfs_exists: artifacts.rootfs.is_file(),
         qemu_available: command_exists("qemu-system-x86_64"),
-        virtiofsd_available: command_exists("virtiofsd"),
+        virtiofsd,
+        unshare_available: !rootless_virtiofsd || command_exists("unshare"),
+        subuid_configured: rootless_virtiofsd.then(|| subordinate_id_configured("/etc/subuid")),
+        subgid_configured: rootless_virtiofsd.then(|| subordinate_id_configured("/etc/subgid")),
         passt_available: command_exists("passt"),
+        curl_available: !include_builder_checks || command_exists("curl"),
+        strings_available: !include_builder_checks || command_exists("strings"),
         docker_available: include_builder_checks && process_succeeds("docker", &["info"]),
-        rust_musl_target_installed: include_builder_checks
-            && rust_target_installed("x86_64-unknown-linux-musl"),
         kvm: device_status("/dev/kvm"),
         vhost_vsock: device_status("/dev/vhost-vsock"),
         cpu_virtualization_available: cpu_virtualization_available(),
@@ -120,7 +141,7 @@ struct ReportOptions {
 fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorReport {
     let artifacts = RuntimeArtifacts::from_runtime_dir(&probe.runtime_dir);
     let artifacts_missing = !probe.kernel_exists || !probe.initrd_exists || !probe.rootfs_exists;
-    let require_passt = options.network.unwrap_or(NetworkMode::Passt) == NetworkMode::Passt;
+    let require_passt = options.network == Some(NetworkMode::Passt);
     let mut issues = Vec::new();
 
     if probe.os != "linux" {
@@ -136,13 +157,50 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
         );
     }
     if !probe.qemu_available {
-        issues.push("Install qemu-system-x86_64, for example Arch package qemu-full.".to_string());
+        issues.push(package_install_issue(
+            probe.distribution.as_ref(),
+            PackageHint::Qemu,
+            "Install qemu-system-x86_64.",
+        ));
     }
-    if !probe.virtiofsd_available {
-        issues.push("Install virtiofsd.".to_string());
+    if probe.virtiofsd.is_none() {
+        issues.push(package_install_issue(
+            probe.distribution.as_ref(),
+            PackageHint::Virtiofsd,
+            "Install virtiofsd, or set FEND_VIRTIOFSD to the binary path.",
+        ));
+    }
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+        && !probe.unshare_available
+    {
+        issues.push(package_install_issue(
+            probe.distribution.as_ref(),
+            PackageHint::Unshare,
+            "Install unshare (usually from util-linux) for rootless virtiofsd.",
+        ));
+    }
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+        && (probe.subuid_configured == Some(false) || probe.subgid_configured == Some(false))
+    {
+        issues.push(
+            "Current user is missing /etc/subuid or /etc/subgid mappings required for rootless virtiofsd."
+                .to_string(),
+        );
     }
     if require_passt && !probe.passt_available {
-        issues.push("Install passt, or launch with FEND_QEMU_NETWORK=user/off.".to_string());
+        issues.push(package_install_issue(
+            probe.distribution.as_ref(),
+            PackageHint::Passt,
+            "Install passt, or launch with FEND_QEMU_NETWORK=user/off.",
+        ));
     }
 
     if !probe.kvm.exists {
@@ -166,16 +224,28 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
     }
 
     if artifacts_missing {
-        issues.push(
-            "Run scripts/prepare-linux-x86_64-runtime.sh to build Linux runtime artifacts."
-                .to_string(),
-        );
-        if options.include_builder_requirements && !probe.docker_available {
-            issues.push("Docker is required by the current Linux runtime builder.".to_string());
+        issues.push("Run `fend setup` to prepare Linux runtime artifacts.".to_string());
+        if options.include_builder_requirements && !probe.curl_available {
+            issues.push(package_install_issue(
+                probe.distribution.as_ref(),
+                PackageHint::Curl,
+                "Install curl so `fend setup` can download runtime assets.",
+            ));
         }
-        if options.include_builder_requirements && !probe.rust_musl_target_installed {
+        if options.include_builder_requirements && !probe.strings_available {
+            issues.push(package_install_issue(
+                probe.distribution.as_ref(),
+                PackageHint::Strings,
+                "Install strings (usually from binutils) so `fend setup` can detect the guest kernel version.",
+            ));
+        }
+        if options.include_builder_requirements && !probe.docker_available {
             issues.push(
-                "Install Rust target x86_64-unknown-linux-musl before building fendd.".to_string(),
+                package_install_issue(
+                    probe.distribution.as_ref(),
+                    PackageHint::Docker,
+                    "Install Docker and start the daemon. `fend setup` currently uses Docker to build rootfs.img.",
+                ),
             );
         }
     }
@@ -183,6 +253,14 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
     let mut fields = vec![
         ("os".to_string(), probe.os.clone()),
         ("architecture".to_string(), probe.arch.clone()),
+        (
+            "distribution".to_string(),
+            probe
+                .distribution
+                .as_ref()
+                .map(DistributionInfo::display_value)
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
         (
             "runtime".to_string(),
             probe.runtime_dir.display().to_string(),
@@ -202,27 +280,47 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
         ("qemu".to_string(), available_value(probe.qemu_available)),
         (
             "virtiofsd".to_string(),
-            available_value(probe.virtiofsd_available),
+            probe
+                .virtiofsd
+                .as_ref()
+                .map(ResolvedVirtiofsd::display_value)
+                .unwrap_or_else(|| "missing".to_string()),
         ),
     ];
+    if probe
+        .virtiofsd
+        .as_ref()
+        .map(ResolvedVirtiofsd::requires_unshare)
+        .unwrap_or(false)
+    {
+        fields.push((
+            "unshare".to_string(),
+            available_value(probe.unshare_available),
+        ));
+        fields.push((
+            "subuid".to_string(),
+            subordinate_id_value(probe.subuid_configured),
+        ));
+        fields.push((
+            "subgid".to_string(),
+            subordinate_id_value(probe.subgid_configured),
+        ));
+    }
     if let Some(network) = options.network {
-        fields.push(("network".to_string(), network_value(network).to_string()));
+        fields.push(("network".to_string(), network.to_string()));
     }
     if options.network.is_none() || require_passt {
         fields.push(("passt".to_string(), available_value(probe.passt_available)));
     }
     if options.include_builder_requirements {
+        fields.push(("curl".to_string(), available_value(probe.curl_available)));
+        fields.push((
+            "strings".to_string(),
+            available_value(probe.strings_available),
+        ));
         fields.push((
             "docker".to_string(),
             available_value(probe.docker_available),
-        ));
-        fields.push((
-            "rust target".to_string(),
-            if probe.rust_musl_target_installed {
-                "installed".to_string()
-            } else {
-                "missing".to_string()
-            },
         ));
     }
     fields.extend([
@@ -246,14 +344,6 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
     }
 }
 
-fn network_value(network: NetworkMode) -> &'static str {
-    match network {
-        NetworkMode::Passt => "passt",
-        NetworkMode::User => "user",
-        NetworkMode::Off => "off",
-    }
-}
-
 fn artifact_value(path: &Path, exists: bool) -> String {
     if exists {
         path.display().to_string()
@@ -267,6 +357,14 @@ fn available_value(value: bool) -> String {
         "available".to_string()
     } else {
         "missing".to_string()
+    }
+}
+
+fn subordinate_id_value(value: Option<bool>) -> String {
+    match value {
+        Some(true) => "configured".to_string(),
+        Some(false) => "missing".to_string(),
+        None => "not checked".to_string(),
     }
 }
 
@@ -298,18 +396,109 @@ fn device_status(path: impl AsRef<Path>) -> DeviceStatus {
     }
 }
 
-fn rust_target_installed(target: &str) -> bool {
-    let Ok(output) = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-    else {
+fn subordinate_id_configured(path: impl AsRef<Path>) -> bool {
+    let Some(user) = current_user_name() else {
         return false;
     };
-    if !output.status.success() {
+    let Ok(contents) = std::fs::read_to_string(path) else {
         return false;
+    };
+    contents
+        .lines()
+        .any(|line| line.starts_with(&format!("{user}:")))
+}
+
+fn current_user_name() -> Option<String> {
+    env::var("USER")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var("LOGNAME").ok().filter(|value| !value.is_empty()))
+}
+
+fn distribution_info() -> Option<DistributionInfo> {
+    let content = std::fs::read_to_string("/etc/os-release").ok()?;
+    let mut id = None;
+    let mut version_id = None;
+
+    for line in content.lines() {
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = raw_value.trim().trim_matches('"').to_string();
+        match key {
+            "ID" => id = Some(value),
+            "VERSION_ID" => version_id = Some(value),
+            _ => {}
+        }
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout.lines().any(|line| line.trim() == target)
+
+    Some(DistributionInfo {
+        id: id?,
+        version_id,
+    })
+}
+
+impl DistributionInfo {
+    fn display_value(&self) -> String {
+        match &self.version_id {
+            Some(version_id) if !version_id.is_empty() => format!("{} {}", self.id, version_id),
+            _ => self.id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PackageHint {
+    Qemu,
+    Virtiofsd,
+    Passt,
+    Docker,
+    Unshare,
+    Curl,
+    Strings,
+}
+
+fn package_install_issue(
+    distribution: Option<&DistributionInfo>,
+    hint: PackageHint,
+    base: &str,
+) -> String {
+    match package_install_command(distribution, hint) {
+        Some(command) => format!("{base} Try: {command}"),
+        None => base.to_string(),
+    }
+}
+
+fn package_install_command(
+    distribution: Option<&DistributionInfo>,
+    hint: PackageHint,
+) -> Option<String> {
+    let distribution = distribution?;
+    match distribution.id.as_str() {
+        "arch" => Some(match hint {
+            PackageHint::Qemu => "sudo pacman -S --needed qemu-system-x86".to_string(),
+            PackageHint::Virtiofsd => "sudo pacman -S --needed virtiofsd".to_string(),
+            PackageHint::Passt => "sudo pacman -S --needed passt".to_string(),
+            PackageHint::Docker => {
+                "sudo pacman -S --needed docker && sudo systemctl enable --now docker".to_string()
+            }
+            PackageHint::Unshare => "sudo pacman -S --needed util-linux".to_string(),
+            PackageHint::Curl => "sudo pacman -S --needed curl".to_string(),
+            PackageHint::Strings => "sudo pacman -S --needed binutils".to_string(),
+        }),
+        "ubuntu" | "debian" => Some(match hint {
+            PackageHint::Qemu => "sudo apt install qemu-system-x86".to_string(),
+            PackageHint::Virtiofsd => "sudo apt install virtiofsd".to_string(),
+            PackageHint::Passt => "sudo apt install passt".to_string(),
+            PackageHint::Docker => {
+                "sudo apt install docker.io && sudo systemctl enable --now docker".to_string()
+            }
+            PackageHint::Unshare => "sudo apt install util-linux".to_string(),
+            PackageHint::Curl => "sudo apt install curl".to_string(),
+            PackageHint::Strings => "sudo apt install binutils".to_string(),
+        }),
+        _ => None,
+    }
 }
 
 fn cpu_virtualization_available() -> Option<bool> {
@@ -335,8 +524,9 @@ mod tests {
 
         assert!(report.issues.is_empty());
         assert_eq!(field(&report, "qemu"), Some("available"));
+        assert_eq!(field(&report, "virtiofsd"), Some("/usr/bin/virtiofsd"));
         assert_eq!(field(&report, "/dev/kvm"), Some("/dev/kvm"));
-        assert_eq!(field(&report, "rust target"), Some("installed"));
+        assert_eq!(field(&report, "distribution"), Some("arch"));
         assert_eq!(
             field(&report, "kernel"),
             Some("/home/user/.fend/runtime/linux-x86_64/vmlinuz")
@@ -352,9 +542,10 @@ mod tests {
         probe.rootfs_exists = false;
         probe.docker_available = false;
         probe.qemu_available = false;
-        probe.virtiofsd_available = false;
+        probe.virtiofsd = None;
         probe.passt_available = false;
-        probe.rust_musl_target_installed = false;
+        probe.curl_available = false;
+        probe.strings_available = false;
         probe.cpu_virtualization_available = Some(false);
         probe.kvm = DeviceStatus {
             path: PathBuf::from("/dev/kvm"),
@@ -378,12 +569,11 @@ mod tests {
         );
         assert_contains(
             &report.issues,
-            "Install qemu-system-x86_64, for example Arch package qemu-full.",
+            "Install qemu-system-x86_64. Try: sudo pacman -S --needed qemu-system-x86",
         );
-        assert_contains(&report.issues, "Install virtiofsd.");
         assert_contains(
             &report.issues,
-            "Install passt, or launch with FEND_QEMU_NETWORK=user/off.",
+            "Install virtiofsd, or set FEND_VIRTIOFSD to the binary path. Try: sudo pacman -S --needed virtiofsd",
         );
         assert_contains(
             &report.issues,
@@ -395,15 +585,19 @@ mod tests {
         );
         assert_contains(
             &report.issues,
-            "Run scripts/prepare-linux-x86_64-runtime.sh to build Linux runtime artifacts.",
+            "Run `fend setup` to prepare Linux runtime artifacts.",
         );
         assert_contains(
             &report.issues,
-            "Docker is required by the current Linux runtime builder.",
+            "Install curl so `fend setup` can download runtime assets. Try: sudo pacman -S --needed curl",
         );
         assert_contains(
             &report.issues,
-            "Install Rust target x86_64-unknown-linux-musl before building fendd.",
+            "Install strings (usually from binutils) so `fend setup` can detect the guest kernel version. Try: sudo pacman -S --needed binutils",
+        );
+        assert_contains(
+            &report.issues,
+            "Install Docker and start the daemon. `fend setup` currently uses Docker to build rootfs.img. Try: sudo pacman -S --needed docker && sudo systemctl enable --now docker",
         );
     }
 
@@ -435,7 +629,7 @@ mod tests {
         let passt_report = evaluate_launch(&probe, NetworkMode::Passt);
         assert_contains(
             &passt_report.issues,
-            "Install passt, or launch with FEND_QEMU_NETWORK=user/off.",
+            "Install passt, or launch with FEND_QEMU_NETWORK=user/off. Try: sudo pacman -S --needed passt",
         );
         assert_eq!(field(&passt_report, "network"), Some("passt"));
         assert_eq!(field(&passt_report, "passt"), Some("missing"));
@@ -448,21 +642,18 @@ mod tests {
         probe.initrd_exists = false;
         probe.rootfs_exists = false;
         probe.docker_available = false;
-        probe.rust_musl_target_installed = false;
+        probe.curl_available = false;
+        probe.strings_available = false;
 
         let report = evaluate_launch(&probe, NetworkMode::User);
 
         assert_contains(
             &report.issues,
-            "Run scripts/prepare-linux-x86_64-runtime.sh to build Linux runtime artifacts.",
+            "Run `fend setup` to prepare Linux runtime artifacts.",
         );
         assert!(!report.issues.iter().any(|issue| issue.contains("Docker")));
-        assert!(!report
-            .issues
-            .iter()
-            .any(|issue| issue.contains("Rust target")));
         assert_eq!(field(&report, "docker"), None);
-        assert_eq!(field(&report, "rust target"), None);
+        assert_eq!(field(&report, "curl"), None);
     }
 
     #[test]
@@ -506,19 +697,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn rootless_virtiofsd_requires_unshare_and_subordinate_ids() {
+        let mut probe = linux_probe();
+        probe.virtiofsd = Some(ResolvedVirtiofsd {
+            path: PathBuf::from("/usr/lib/virtiofsd"),
+            mode: crate::tools::VirtiofsdMode::RootlessUnshare,
+        });
+        probe.unshare_available = false;
+        probe.subuid_configured = Some(false);
+        probe.subgid_configured = Some(true);
+
+        let report = evaluate_launch(&probe, NetworkMode::User);
+
+        assert_contains(
+            &report.issues,
+            "Install unshare (usually from util-linux) for rootless virtiofsd. Try: sudo pacman -S --needed util-linux",
+        );
+        assert_contains(
+            &report.issues,
+            "Current user is missing /etc/subuid or /etc/subgid mappings required for rootless virtiofsd.",
+        );
+        assert_eq!(
+            field(&report, "virtiofsd"),
+            Some("/usr/lib/virtiofsd (rootless via unshare)")
+        );
+        assert_eq!(field(&report, "unshare"), Some("missing"));
+        assert_eq!(field(&report, "subuid"), Some("missing"));
+        assert_eq!(field(&report, "subgid"), Some("configured"));
+    }
+
     fn linux_probe() -> HostProbe {
         HostProbe {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
+            distribution: Some(DistributionInfo {
+                id: "arch".to_string(),
+                version_id: None,
+            }),
             runtime_dir: PathBuf::from("/home/user/.fend/runtime/linux-x86_64"),
             kernel_exists: true,
             initrd_exists: true,
             rootfs_exists: true,
             qemu_available: true,
-            virtiofsd_available: true,
+            virtiofsd: Some(ResolvedVirtiofsd::direct("/usr/bin/virtiofsd")),
+            unshare_available: true,
+            subuid_configured: None,
+            subgid_configured: None,
             passt_available: true,
+            curl_available: true,
+            strings_available: true,
             docker_available: true,
-            rust_musl_target_installed: true,
             kvm: DeviceStatus {
                 path: PathBuf::from("/dev/kvm"),
                 exists: true,

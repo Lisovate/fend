@@ -9,14 +9,7 @@ const fs = require("fs");
 const path = require("path");
 
 const target = `${process.platform}-${process.arch}`;
-const SUPPORTED = ["darwin-arm64"];
-
-if (!SUPPORTED.includes(target)) {
-  console.error(`fend: ${target} is not yet supported.`);
-  console.error(`Supported: ${SUPPORTED.join(", ")}`);
-  console.error(`Roadmap: https://github.com/Lisovate/fend`);
-  process.exit(1);
-}
+const PACKAGED = ["darwin-arm64", "linux-x64"];
 
 const pkg = `@fendsh/cli-${target}`;
 
@@ -35,14 +28,38 @@ function findBinary() {
   );
   if (fs.existsSync(dev)) return dev;
 
+  if (target === "linux-x64") {
+    for (const candidate of [
+      path.resolve(__dirname, "..", "linux", "target", "release", "fend"),
+      path.resolve(__dirname, "..", "linux", "target", "debug", "fend"),
+    ]) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+
   return null;
 }
 
 const binary = findBinary();
 if (!binary) {
+  if (!PACKAGED.includes(target)) {
+    console.error(`fend: ${target} is not packaged yet.`);
+    if (target === "linux-x64") {
+      console.error(`Local dev fallback: build the Rust Linux binary first:`);
+      console.error(`  cargo build --manifest-path linux/Cargo.toml --bin fend`);
+    } else {
+      console.error(`Roadmap: https://github.com/Lisovate/fend`);
+    }
+    process.exit(1);
+  }
+
   console.error(`fend: native binary for ${target} is missing.`);
   console.error(`If you installed via npm, optional deps may have been skipped:`);
   console.error(`  npm install ${pkg}`);
+  if (target === "linux-x64") {
+    console.error(`For local packaging tests, stage the Linux binaries with:`);
+    console.error(`  ./scripts/build-linux-binary.sh`);
+  }
   process.exit(1);
 }
 

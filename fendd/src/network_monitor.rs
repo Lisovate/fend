@@ -53,7 +53,10 @@ fn poll_loop(state: SharedState) {
             let mut dead = Vec::new();
             for (i, sub) in s.subscribers.iter_mut().enumerate() {
                 for conn in &opened {
-                    eprintln!("fendd: net connect {}:{} ({})", conn.remote, conn.port, conn.state);
+                    eprintln!(
+                        "fendd: net connect {}:{} ({})",
+                        conn.remote, conn.port, conn.state
+                    );
                     if send_network_event(sub, conn).is_err() {
                         dead.push(i);
                         break;
@@ -118,7 +121,9 @@ fn scan_connections() -> HashSet<Conn> {
 fn collect(data: &str, v6: bool, out: &mut HashSet<Conn>) {
     for line in data.lines().skip(1) {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 { continue; }
+        if parts.len() < 4 {
+            continue;
+        }
 
         // "st" is the 4th column, hex state code.
         let state = match parts[3] {
@@ -139,35 +144,50 @@ fn collect(data: &str, v6: bool, out: &mut HashSet<Conn>) {
             Err(_) => continue,
         };
 
-        let ip = if v6 { parse_v6(ip_hex) } else { parse_v4(ip_hex) };
+        let ip = if v6 {
+            parse_v6(ip_hex)
+        } else {
+            parse_v4(ip_hex)
+        };
         if let Some(ip) = ip {
             // Skip loopback — noisy and not a real exfil signal.
             if ip.starts_with("127.") || ip == "::1" || ip.starts_with("0.0.0.0") {
                 continue;
             }
-            out.insert(Conn { remote: ip, port, state: state.to_string() });
+            out.insert(Conn {
+                remote: ip,
+                port,
+                state: state.to_string(),
+            });
         }
     }
 }
 
 /// Decode a little-endian v4 address in /proc/net format (e.g. "0100007F" → "127.0.0.1").
 fn parse_v4(hex: &str) -> Option<String> {
-    if hex.len() != 8 { return None; }
-    let bytes: Vec<u8> = (0..4).map(|i| {
-        u8::from_str_radix(&hex[i*2..i*2+2], 16).unwrap_or(0)
-    }).collect();
-    Some(format!("{}.{}.{}.{}", bytes[3], bytes[2], bytes[1], bytes[0]))
+    if hex.len() != 8 {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..4)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0))
+        .collect();
+    Some(format!(
+        "{}.{}.{}.{}",
+        bytes[3], bytes[2], bytes[1], bytes[0]
+    ))
 }
 
 /// Decode a v6 address — /proc format is 8×4 nibbles grouped little-endian
 /// per 32-bit word. We keep it simple: print as colon-separated hex groups.
 fn parse_v6(hex: &str) -> Option<String> {
-    if hex.len() != 32 { return None; }
+    if hex.len() != 32 {
+        return None;
+    }
     let mut parts = Vec::with_capacity(8);
     for word in 0..4 {
-        let chunk = &hex[word*8..word*8+8];
+        let chunk = &hex[word * 8..word * 8 + 8];
         // Reverse byte order within each 32-bit word.
-        let bytes: Vec<&str> = (0..4).map(|i| &chunk[i*2..i*2+2]).collect();
+        let bytes: Vec<&str> = (0..4).map(|i| &chunk[i * 2..i * 2 + 2]).collect();
         parts.push(format!("{}{}", bytes[3], bytes[2]));
         parts.push(format!("{}{}", bytes[1], bytes[0]));
     }
@@ -180,8 +200,8 @@ fn send_network_event(stream: &mut VsockStream, conn: &Conn) -> std::io::Result<
         port: conn.port,
         state: conn.state.clone(),
     };
-    let json = serde_json::to_vec(&msg)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json =
+        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     write_frame(stream, MessageType::NetworkEvent, &json)
 }
 
@@ -191,7 +211,8 @@ mod tests {
 
     #[test]
     fn test_collect_established_ipv4_connection() {
-        let content = "  sl  local_address rem_address   st\n   0: 0F02000A:A1B2 22D8B85D:01BB 01\n";
+        let content =
+            "  sl  local_address rem_address   st\n   0: 0F02000A:A1B2 22D8B85D:01BB 01\n";
         let mut out = HashSet::new();
         collect(content, false, &mut out);
 
@@ -204,7 +225,8 @@ mod tests {
 
     #[test]
     fn test_collect_syn_sent_ipv4_connection() {
-        let content = "  sl  local_address rem_address   st\n   0: 0F02000A:A1B2 08080808:0035 02\n";
+        let content =
+            "  sl  local_address rem_address   st\n   0: 0F02000A:A1B2 08080808:0035 02\n";
         let mut out = HashSet::new();
         collect(content, false, &mut out);
 

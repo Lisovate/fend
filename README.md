@@ -9,11 +9,14 @@ fend audit              # OSV.dev advisory check across the lockfile
 fend audit --fix        # propose + apply safe upgrades
 ```
 
-> **Status: alpha — macOS Apple Silicon only.** The Swift CLI, the Rust guest
-> agent, the warm-VM daemon, port forwarding, the shell hook, and the audit
-> flow all work end-to-end. The npm package (`@fendsh/cli`) is still a
-> placeholder; for now you build from source. Linux & Windows are on the
-> roadmap, not in this release.
+> **Status: alpha.** macOS Apple Silicon is the only released platform today.
+> The Swift CLI, the Rust guest agent, the warm-VM daemon, port forwarding,
+> the shell hook, and the audit flow all work end-to-end there. Linux x86_64
+> now has a working Rust `fend` path with real QEMU/KVM validation on Arch,
+> automatic first-run runtime setup, disposable command execution, working
+> `npm run dev` port forwarding, and a real npm pack/install workflow in the
+> repo, but that Linux path is not published or supported as a release yet.
+> Windows remains roadmap-only.
 
 ---
 
@@ -32,12 +35,12 @@ This is the browser security model applied to local development.
 ## Quickstart
 
 ```bash
-# build from source (see "Build from source" below)
+# macOS from source (see "Build from source" below)
 make -C swift sign
 sudo cp swift/.build/release/fend /usr/local/bin/fend
 
-# first run downloads the Linux kernel + builds a rootfs image (~1.5 GB,
-# requires Docker; one-time, cached in ~/.fend/runtime)
+# first run auto-prepares the guest runtime (~1.5 GB today on Linux because
+# rootfs.img is built locally with Docker; cached afterward in ~/.fend/runtime)
 fend npm install
 
 # everything else is just `fend <command>`
@@ -230,7 +233,7 @@ For deep architecture detail — VM lifecycle, scenarios, file-watching/HMR stra
 
 ## Build from source
 
-You'll need Xcode 15+ (Swift 5.9+), Rust (for the guest agent), and Docker (one-time, to build the Linux rootfs image on first run).
+You'll need Xcode 15+ (Swift 5.9+), Rust, and Docker.
 
 ```bash
 # Swift CLI + daemon
@@ -245,11 +248,28 @@ cd fendd && cargo build --release --target aarch64-unknown-linux-musl
 swift test --package-path swift
 ```
 
-First time you run `fend <anything>`, `swift/scripts/prepare-runtime.sh` fires and prepares `~/.fend/runtime/` (kernel + initrd + rootfs.img). Takes a few minutes; cached afterward.
+On macOS, the first `fend <anything>` call runs `swift/scripts/prepare-runtime.sh`
+and prepares `~/.fend/runtime/`. On Linux x86_64, the Rust binary now owns
+that flow: `fend setup` prepares `~/.fend/runtime/linux-x86_64`, and normal
+`fend <command>` runs bootstrap it automatically when needed.
 
 ### Packaging for npm
 
-`scripts/build-binary.sh` builds a release binary and stages it into `packages/cli-darwin-arm64/bin/` so the JS wrapper at `bin/fend.js` can find it. The wrapper resolves the correct platform package via npm's `optionalDependencies`, falling back to the monorepo path during local development.
+`scripts/build-binary.sh` stages the macOS Apple Silicon binary into
+`packages/cli-darwin-arm64/bin/`. `scripts/build-linux-binary.sh` stages the
+Linux x64 host `fend` binary plus the packaged `fendd` guest agent into
+`packages/cli-linux-x64/`. The JS wrapper at `bin/fend.js` resolves the right
+platform package via npm's `optionalDependencies`, falling back to monorepo
+artifacts during local development.
+
+For local release verification:
+
+- `./scripts/pack-npm.sh --platform linux-x64` builds/stages the Linux binaries
+  and emits the root + platform `.tgz` packages.
+- `./scripts/test-linux-npm-package.sh` installs those tarballs into a throwaway
+  npm prefix and verifies the installed `fend` wrapper end to end.
+- `./scripts/publish-npm.sh --platform linux-x64 --dry-run` checks the publish
+  order and package contents without touching the registry.
 
 Publishing requires Developer ID signing + Apple notarization — Apple Virtualization entitlements are otherwise rejected at runtime on end-user machines. The current build script only ad-hoc signs.
 
@@ -260,7 +280,13 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 - **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
 - **Next:** macOS Intel.
 - **Then:** Linux via KVM/QEMU first, with a smaller custom backend evaluated later. See [`docs/linux-backend.md`](./docs/linux-backend.md).
-- **Linux spike:** Linux host work lives separately in Rust under `linux/`; `fend-linux` can render doctor output, inspect launch plans, run launch-time preflight before supervising QEMU/`virtiofsd`, and verify host-to-`fendd` command execution with bounded `fend-linux smoke` sessions; launch uses disposable rootfs writes, `scripts/prepare-linux-x86_64-runtime.sh` builds the x86_64 runtime artifacts, `scripts/linux-qemu-spike.sh` captures the manual QEMU/KVM launch shape, and `scripts/test-linux-spike-scripts.sh` covers host-independent checks.
+- **Linux path in progress:** Linux host work lives separately in Rust under
+  `linux/`; the crate now exposes both `fend-linux` and a Linux `fend`
+  binary, supports `fend doctor`, `fend setup`, disposable `fend <command>`
+  runs, automatic fallback from missing `passt` to QEMU user networking, and
+  real guest command execution with QEMU/KVM and `virtiofsd`. Packaging and
+  local install verification are wired for `@fendsh/cli-linux-x64` in the
+  repo, but the Linux npm path is not published yet.
 - **Future:** Windows (WSL2), AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
 
 Issues, bug reports, and PRs welcome.

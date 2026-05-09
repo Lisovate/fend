@@ -17,6 +17,7 @@ Options:
 Environment:
   FEND_RUNTIME_DIR       Runtime dir containing vmlinuz, initrd, rootfs.img.
                          Default: ~/.fend/runtime/linux-x86_64
+  FEND_VIRTIOFSD        Override virtiofsd binary path.
   FEND_DEV_DIR           Device dir for preflight checks. Default: /dev
   FEND_QEMU_CID          Guest vsock CID. Default: 42
   FEND_QEMU_CPUS         vCPU count. Default: 2
@@ -66,6 +67,40 @@ CPUS="${FEND_QEMU_CPUS:-2}"
 MEMORY_MB="${FEND_QEMU_MEMORY_MB:-2048}"
 NETWORK="${FEND_QEMU_NETWORK:-passt}"
 
+resolve_virtiofsd() {
+    local override="${FEND_VIRTIOFSD:-}"
+    if [[ -n "${override}" ]]; then
+        if [[ "${override}" == */* ]]; then
+            [[ -x "${override}" ]] && printf '%s\n' "${override}" && return 0
+        elif command -v "${override}" >/dev/null 2>&1; then
+            command -v "${override}"
+            return 0
+        fi
+        return 1
+    fi
+
+    if command -v virtiofsd >/dev/null 2>&1; then
+        command -v virtiofsd
+        return 0
+    fi
+
+    local candidate
+    for candidate in /usr/lib/virtiofsd /usr/libexec/virtiofsd /usr/lib/qemu/virtiofsd; do
+        if [[ -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+VIRTIOFSD_PATH="$(resolve_virtiofsd || true)"
+VIRTIOFSD_MODE="direct"
+if [[ "${VIRTIOFSD_PATH}" == */usr/lib/virtiofsd ]]; then
+    VIRTIOFSD_MODE="rootless-unshare"
+fi
+
 preflight() {
     local failed=0
 
@@ -90,13 +125,27 @@ preflight() {
         check_fail "arch" "must be x86_64"
     fi
 
-    for cmd in qemu-system-x86_64 virtiofsd base64; do
+    for cmd in qemu-system-x86_64 base64; do
         if command -v "${cmd}" >/dev/null 2>&1; then
             check_ok "${cmd}" "ok"
         else
             check_fail "${cmd}" "missing"
         fi
     done
+
+    if [[ -n "${VIRTIOFSD_PATH}" ]]; then
+        check_ok "virtiofsd" "${VIRTIOFSD_PATH}"
+    else
+        check_fail "virtiofsd" "missing"
+    fi
+
+    if [[ "${VIRTIOFSD_MODE}" == "rootless-unshare" ]]; then
+        if command -v unshare >/dev/null 2>&1; then
+            check_ok "unshare" "ok"
+        else
+            check_fail "unshare" "missing"
+        fi
+    fi
 
     case "${NETWORK}" in
         passt)
@@ -180,11 +229,20 @@ start_virtiofsd() {
     local source="$2"
     local socket="$3"
 
-    virtiofsd \
-        --socket-path="${socket}" \
-        --cache=auto \
-        -o "source=${source}" \
-        >"${LOG_DIR}/virtiofsd-${name}.log" 2>&1 &
+    if [[ "${VIRTIOFSD_MODE}" == "rootless-unshare" ]]; then
+        unshare -r --map-auto -- \
+            "${VIRTIOFSD_PATH}" \
+            --socket-path="${socket}" \
+            --shared-dir "${source}" \
+            --sandbox chroot \
+            >"${LOG_DIR}/virtiofsd-${name}.log" 2>&1 &
+    else
+        "${VIRTIOFSD_PATH}" \
+            --socket-path="${socket}" \
+            --cache=auto \
+            -o "source=${source}" \
+            >"${LOG_DIR}/virtiofsd-${name}.log" 2>&1 &
+    fi
     local pid="$!"
     VIRTIOFSD_PIDS+=("${pid}")
 

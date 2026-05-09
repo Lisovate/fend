@@ -6,6 +6,10 @@
   "bin": {
     "fend": "bin/fend.js"
   },
+  "scripts": {
+    "pack:npm": "./scripts/pack-npm.sh",
+    "test:npm:linux": "./scripts/test-linux-npm-package.sh"
+  },
   "files": [
     "bin/",
     "README.md",
@@ -15,7 +19,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@fendsh/cli-darwin-arm64": "0.1.0-alpha.1"
+    "@fendsh/cli-darwin-arm64": "0.1.0-alpha.1",
+    "@fendsh/cli-linux-x64": "0.1.0-alpha.1"
   },
   "keywords": [
     "security",
@@ -23,6 +28,7 @@
     "npm",
     "supply-chain",
     "virtualization",
+    "linux",
     "macos"
   ],
   "license": "MIT",
@@ -32,5 +38,8 @@
   },
   "bugs": {
     "url": "https://github.com/Lisovate/fend/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

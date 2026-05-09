@@ -1,6 +1,7 @@
 use crate::protocol::*;
 use crate::vsock::VsockStream;
 use std::io::{BufReader, Read};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -22,11 +23,9 @@ pub enum SpawnResult {
 }
 
 /// Spawn a command in pipe mode (separate stdout/stderr streams).
-pub fn spawn(
-    writer: &Arc<Mutex<VsockStream>>,
-    cmd: &ExecuteCommand,
-) -> Result<SpawnResult, ()> {
-    let env = build_env(cmd);
+pub fn spawn(writer: &Arc<Mutex<VsockStream>>, cmd: &ExecuteCommand) -> Result<SpawnResult, ()> {
+    let (target_uid, target_gid) = resolve_command_identity(&cmd.cwd);
+    let env = build_env(cmd, target_uid);
     let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     let child = unsafe {
@@ -37,7 +36,7 @@ pub fn spawn(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped())
-            .pre_exec(move || prepare_child(network_mode.as_deref()))
+            .pre_exec(move || prepare_child(network_mode.as_deref(), target_uid, target_gid))
             .spawn()
     };
 
@@ -93,7 +92,8 @@ pub fn spawn_pty(
     writer: &Arc<Mutex<VsockStream>>,
     cmd: &ExecuteCommand,
 ) -> Result<SpawnResult, ()> {
-    let env = build_env(cmd);
+    let (target_uid, target_gid) = resolve_command_identity(&cmd.cwd);
+    let env = build_env(cmd, target_uid);
     let network_mode = env.get("FEND_NETWORK_MODE").cloned();
 
     // Allocate PTY
@@ -110,7 +110,12 @@ pub fn spawn_pty(
     };
     if ret < 0 {
         let e = std::io::Error::last_os_error();
-        let _ = send_output(writer, cmd.id, "stderr", format!("fendd: openpty: {}\n", e).as_bytes());
+        let _ = send_output(
+            writer,
+            cmd.id,
+            "stderr",
+            format!("fendd: openpty: {}\n", e).as_bytes(),
+        );
         send_exit(writer, cmd.id, 127);
         return Err(());
     }
@@ -126,7 +131,7 @@ pub fn spawn_pty(
             .stdout(Stdio::from_raw_fd(libc::dup(slave_fd)))
             .stderr(Stdio::from_raw_fd(slave_fd))
             .pre_exec(move || {
-                prepare_child(network_mode.as_deref())?;
+                prepare_child(network_mode.as_deref(), target_uid, target_gid)?;
                 // Create new session and set controlling terminal
                 if libc::setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
@@ -179,13 +184,17 @@ pub fn spawn_pty(
         send_exit(&w2, id, code);
     });
 
-    Ok(SpawnResult::Pty { pid, master_fd: master, waiter })
+    Ok(SpawnResult::Pty {
+        pid,
+        master_fd: master,
+        waiter,
+    })
 }
 
 /// Drop privileges before exec. Linux path:
 ///   1. Apply PR_SET_NO_NEW_PRIVS so setuid/file-caps can't escalate later.
 ///   2. Clear supplementary groups so root's groups don't leak.
-///   3. setgid/setuid to uid 1000.
+///   3. setgid/setuid to the ownership of the command cwd.
 ///   4. Clear the process capability sets (belt-and-suspenders — exec'ing a
 ///      non-root binary already drops ambient caps, but this closes any gap
 ///      if KEEP_CAPS was ever set upstream).
@@ -193,7 +202,7 @@ pub fn spawn_pty(
 /// macOS host-check path: compile-only stub, since the guest workload only
 /// runs inside the Linux VM where this function is actually called.
 #[cfg(target_os = "linux")]
-fn drop_root() -> Result<(), std::io::Error> {
+fn drop_root(uid: u32, gid: u32) -> Result<(), std::io::Error> {
     unsafe {
         // Block setuid/file-cap escalation for this process + any children.
         if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -203,10 +212,10 @@ fn drop_root() -> Result<(), std::io::Error> {
         if libc::setgroups(0, std::ptr::null()) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if libc::setgid(1000) != 0 {
+        if libc::setgid(gid) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if libc::setuid(1000) != 0 {
+        if libc::setuid(uid) != 0 {
             return Err(std::io::Error::last_os_error());
         }
 
@@ -228,15 +237,19 @@ fn drop_root() -> Result<(), std::io::Error> {
             pid: 0,
         };
         let data = [
-            CapData { effective: 0, permitted: 0, inheritable: 0 },
-            CapData { effective: 0, permitted: 0, inheritable: 0 },
+            CapData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
         ];
         // capset is syscall 125 on arm64; 126 on x86_64. Use the libc constant.
-        let rc = libc::syscall(
-            libc::SYS_capset,
-            &mut header as *mut _,
-            data.as_ptr(),
-        );
+        let rc = libc::syscall(libc::SYS_capset, &mut header as *mut _, data.as_ptr());
         if rc != 0 {
             // Don't fail — exec already drops ambient caps automatically and
             // some kernels reject capset-after-setuid without CAP_SETPCAP.
@@ -247,14 +260,20 @@ fn drop_root() -> Result<(), std::io::Error> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn drop_root() -> Result<(), std::io::Error> {
+fn drop_root(_uid: u32, _gid: u32) -> Result<(), std::io::Error> {
     // Host-check stub — the real workload only runs in the Linux VM.
     Ok(())
 }
 
-fn prepare_child(network_mode: Option<&str>) -> Result<(), std::io::Error> {
+fn prepare_child(network_mode: Option<&str>, uid: u32, gid: u32) -> Result<(), std::io::Error> {
     apply_network_policy(network_mode)?;
-    drop_root()
+    drop_root(uid, gid)
+}
+
+fn resolve_command_identity(cwd: &str) -> (u32, u32) {
+    std::fs::metadata(cwd)
+        .map(|metadata| (metadata.uid(), metadata.gid()))
+        .unwrap_or((1000, 1000))
 }
 
 #[cfg(target_os = "linux")]
@@ -273,16 +292,40 @@ fn apply_network_policy(_network_mode: Option<&str>) -> Result<(), std::io::Erro
     Ok(())
 }
 
-fn build_env(cmd: &ExecuteCommand) -> std::collections::HashMap<String, String> {
+fn build_env(cmd: &ExecuteCommand, target_uid: u32) -> std::collections::HashMap<String, String> {
     let mut env = cmd.env.clone();
-    let path = format!("/home/user/.local/bin:{}", std::env::var("PATH").unwrap_or_default());
+    let mut path_entries = Vec::new();
+    if let Some(prepend) = env
+        .remove("FEND_TOOL_PATH_PREPEND")
+        .filter(|value| !value.is_empty())
+    {
+        path_entries.push(prepend);
+    }
+    path_entries.push("/home/user/.local/bin".to_string());
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    if !inherited_path.is_empty() {
+        path_entries.push(inherited_path);
+    }
+    let path = path_entries.join(":");
+    let (home, user, npm_cache) = if target_uid == 0 {
+        ("/root", "root", "/root/.npm")
+    } else {
+        ("/home/user", "user", "/home/user/.npm")
+    };
     env.insert("PATH".to_string(), path);
-    env.insert("HOME".to_string(), "/home/user".to_string());
-    env.insert("USER".to_string(), "user".to_string());
+    env.insert("HOME".to_string(), home.to_string());
+    env.insert("USER".to_string(), user.to_string());
     env.entry("NPM_CONFIG_CACHE".to_string())
-        .or_insert_with(|| "/home/user/.npm".to_string());
+        .or_insert_with(|| npm_cache.to_string());
+    env.entry("COREPACK_HOME".to_string())
+        .or_insert_with(|| format!("{home}/.cache/node/corepack"));
     if cmd.tty {
-        env.insert("TERM".to_string(), env.get("TERM").cloned().unwrap_or_else(|| "xterm-256color".to_string()));
+        env.insert(
+            "TERM".to_string(),
+            env.get("TERM")
+                .cloned()
+                .unwrap_or_else(|| "xterm-256color".to_string()),
+        );
     }
     env
 }
@@ -320,7 +363,8 @@ fn send_output(
         stream: stream.to_string(),
         data: base64_encode(data),
     };
-    let json = serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json =
+        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let mut w = writer.lock().unwrap();
     write_frame(&mut *w, MessageType::OutputData, &json)
 }
@@ -347,11 +391,15 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert!(env.get("PATH").unwrap().contains("/home/user/.local/bin"));
         assert_eq!(env.get("HOME").unwrap(), "/home/user");
         assert_eq!(env.get("USER").unwrap(), "user");
         assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/home/user/.npm");
+        assert_eq!(
+            env.get("COREPACK_HOME").unwrap(),
+            "/home/user/.cache/node/corepack"
+        );
     }
 
     #[test]
@@ -366,8 +414,30 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("MY_VAR").unwrap(), "my_value");
+    }
+
+    #[test]
+    fn test_build_env_prepends_selected_tool_path() {
+        let mut cmd_env = HashMap::new();
+        cmd_env.insert(
+            "FEND_TOOL_PATH_PREPEND".to_string(),
+            "/opt/tools/node-22.11.0-linux-x64/bin".to_string(),
+        );
+        let cmd = ExecuteCommand {
+            id: 1,
+            cmd: "test".to_string(),
+            args: vec![],
+            env: cmd_env,
+            cwd: "/tmp".to_string(),
+            tty: false,
+        };
+
+        let env = build_env(&cmd, 1000);
+        let path = env.get("PATH").unwrap();
+        assert!(path.starts_with("/opt/tools/node-22.11.0-linux-x64/bin:/home/user/.local/bin:"));
+        assert!(!env.contains_key("FEND_TOOL_PATH_PREPEND"));
     }
 
     #[test]
@@ -382,7 +452,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: false,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/tmp/npm-cache");
     }
 
@@ -396,7 +466,7 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: true,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("TERM").unwrap(), "xterm-256color");
     }
 
@@ -412,7 +482,27 @@ mod tests {
             cwd: "/tmp".to_string(),
             tty: true,
         };
-        let env = build_env(&cmd);
+        let env = build_env(&cmd, 1000);
         assert_eq!(env.get("TERM").unwrap(), "screen-256color");
+    }
+
+    #[test]
+    fn test_build_env_uses_root_home_for_root_identity() {
+        let cmd = ExecuteCommand {
+            id: 1,
+            cmd: "test".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: "/tmp".to_string(),
+            tty: false,
+        };
+        let env = build_env(&cmd, 0);
+        assert_eq!(env.get("HOME").unwrap(), "/root");
+        assert_eq!(env.get("USER").unwrap(), "root");
+        assert_eq!(env.get("NPM_CONFIG_CACHE").unwrap(), "/root/.npm");
+        assert_eq!(
+            env.get("COREPACK_HOME").unwrap(),
+            "/root/.cache/node/corepack"
+        );
     }
 }

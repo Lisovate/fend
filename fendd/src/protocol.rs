@@ -124,7 +124,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<(MessageType, Vec<u8>)> {
 
     let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
     if len > MAX_PAYLOAD {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "payload too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "payload too large",
+        ));
     }
 
     let mut payload = vec![0u8; len];
@@ -160,8 +163,16 @@ pub fn base64_encode(input: &[u8]) -> String {
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(B64[((n >> 18) & 0x3F) as usize] as char);
         out.push(B64[((n >> 12) & 0x3F) as usize] as char);
-        out.push(if chunk.len() > 1 { B64[((n >> 6) & 0x3F) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { B64[(n & 0x3F) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            B64[((n >> 6) & 0x3F) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64[(n & 0x3F) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }

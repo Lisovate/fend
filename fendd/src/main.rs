@@ -25,11 +25,25 @@ fn main() {
     eprintln!("fendd: starting (pid {})", std::process::id());
 
     init::initialize();
+    let listener = match server::bind() {
+        Ok(listener) => {
+            eprintln!(
+                "fendd: listening on vsock port {}",
+                crate::protocol::VSOCK_PORT
+            );
+            listener
+        }
+        Err(error) => {
+            eprintln!("fendd: failed to bind vsock: {}", error);
+            init::exec_shell();
+            return;
+        }
+    };
     port_monitor::start();
     port_forward::start();
     network_monitor::start();
 
     eprintln!("fendd: ready");
 
-    server::run();
+    server::run(listener);
 }

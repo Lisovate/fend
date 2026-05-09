@@ -1,19 +1,20 @@
 {
-  "name": "@fendsh/cli-darwin-arm64",
+  "name": "@fendsh/cli-linux-x64",
   "version": "0.1.0-alpha.1",
-  "description": "Native fend binary for macOS Apple Silicon. Installed automatically as an optional dependency of @fendsh/cli.",
+  "description": "Native fend binary and guest agent for Linux x64. Installed automatically as an optional dependency of @fendsh/cli.",
   "homepage": "https://fend.sh",
   "files": [
     "bin/",
+    "libexec/",
     "LICENSE"
   ],
-  "os": ["darwin"],
-  "cpu": ["arm64"],
+  "os": ["linux"],
+  "cpu": ["x64"],
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Lisovate/fend.git",
-    "directory": "packages/cli-darwin-arm64"
+    "directory": "packages/cli-linux-x64"
   },
   "bugs": {
     "url": "https://github.com/Lisovate/fend/issues"

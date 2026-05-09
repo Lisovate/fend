@@ -185,7 +185,7 @@ detect_kernel_version() {
 }
 
 ensure_fendd() {
-    if [[ ! -f "${FENDD_BIN}" && "${FEND_BUILD_FENDD:-0}" == "1" ]]; then
+    if [[ "${FEND_BUILD_FENDD:-0}" == "1" ]]; then
         require_cmd cargo
         info "building fendd for ${RUST_TARGET}"
         (
