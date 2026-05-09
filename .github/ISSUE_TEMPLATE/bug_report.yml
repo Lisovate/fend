@@ -1,0 +1,74 @@
+name: Bug report
+description: Report a reproducible problem in Fend itself
+title: "[bug] "
+labels:
+  - bug
+  - triage
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What broke? Keep it short and concrete.
+      placeholder: Fend hangs after the guest boots when running `fend npm install`
+    validations:
+      required: true
+
+  - type: textarea
+    id: version
+    attributes:
+      label: Fend version
+      description: Paste the exact output of `fend --version`
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      description: Paste the output of `sw_vers -productVersion`
+      placeholder: "15.5"
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Doctor output
+      description: Paste `fend doctor`. If `fend doctor` is unavailable, paste `sw_vers` instead.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command that was run
+      description: Include the exact command line and any relevant environment variables.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste `fend log --json` output for the run. Redact secrets, tokens, and sensitive paths if needed.
+      render: json
+    validations:
+      required: false

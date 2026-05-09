@@ -1,0 +1,9 @@
+# TODO: enable GitHub Discussions in repo settings before relying on the link below.
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/Lisovate/fend/discussions
+    about: Use GitHub Discussions for setup questions, usage help, and general ideas.
+  - name: Security vulnerability report
+    url: https://github.com/Lisovate/fend/security/policy
+    about: Please report vulnerabilities privately first using the security policy.
