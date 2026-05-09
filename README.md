@@ -1,6 +1,10 @@
+![CI](https://github.com/Lisovate/fend/actions/workflows/ci.yml/badge.svg) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Platform: macOS%20arm64](https://img.shields.io/badge/platform-macOS%20arm64-111827) ![Status: alpha](https://img.shields.io/badge/status-alpha-f59e0b)
+
 # fend
 
 **Fend off risky dependencies.** A sandboxed runtime for `npm install` and friends.
+
+`npm install` still runs arbitrary third-party code as your user, and recent supply-chain attacks have shown how little friction that takes in practice. Incidents around packages used by teams depending on Axios, Bitwarden CLI, and SAP's Mini Shai-Hulud demonstrate the same pattern: once install-time code executes on the host, secrets and developer environments are in scope. Existing tooling mostly catches known bad packages after the fact. Fend takes the opposite approach and assumes package execution is hostile by default.
 
 ```bash
 fend npm install        # runs npm install inside a micro-VM
@@ -277,19 +281,40 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 
 ## Roadmap
 
-- **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
-- **Next:** macOS Intel.
-- **Then:** Linux via KVM/QEMU first, with a smaller custom backend evaluated later. See [`docs/linux-backend.md`](./docs/linux-backend.md).
-- **Linux path in progress:** Linux host work lives separately in Rust under
-  `linux/`; the crate now exposes both `fend-linux` and a Linux `fend`
-  binary, supports `fend doctor`, `fend setup`, disposable `fend <command>`
-  runs, automatic fallback from missing `passt` to QEMU user networking, and
-  real guest command execution with QEMU/KVM and `virtiofsd`. Packaging and
-  local install verification are wired for `@fendsh/cli-linux-x64` in the
-  repo, but the Linux npm path is not published yet.
-- **Future:** Windows (WSL2), AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
+- Fend is focused on a solid macOS Apple Silicon alpha first: npm
+  distribution, Developer ID signing, notarization, and real-project soak.
+- macOS Intel is the next platform candidate after the Apple Silicon alpha is
+  stable.
+- Linux host work is active in Rust under `linux/`, but the release path is
+  still macOS-first today.
+- Windows and AI-assisted review remain future work.
+
+See [docs/ROADMAP.md](./docs/ROADMAP.md) for the roadmap summary and
+[docs/linux-backend.md](./docs/linux-backend.md) for the detailed Linux plan.
 
 Issues, bug reports, and PRs welcome.
+
+---
+
+## Security
+
+Fend is a security tool, so the repo treats supply-chain and disclosure hygiene
+as part of the product. Signed commits, branch protection, and private
+vulnerability disclosure are part of the expected release process. See
+[SECURITY.md](./SECURITY.md) for the reporting policy and response expectations.
+
+## Contributing
+
+If you want to contribute, start with [CONTRIBUTING.md](./CONTRIBUTING.md) for
+build/test expectations and [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for the
+community ground rules. Small, focused PRs with tests and relevant docs updates
+are the easiest to review.
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE).
 
 ---
 
@@ -303,9 +328,3 @@ Standing on the shoulders of:
 - [OSV.dev](https://osv.dev/) — open vulnerability database powering `fend audit`
 - [OrbStack](https://orbstack.dev/) — proof that VMs on Mac can feel native
 - [swift-argument-parser](https://github.com/apple/swift-argument-parser)
-
----
-
-## License
-
-MIT — see [LICENSE](./LICENSE).

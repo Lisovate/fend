@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps):"
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps):"
+
+  # `bin/` contains only the wrapper entrypoint. The npm manifest lives at the
+  # repo root, so Dependabot needs to watch `/` rather than a nonexistent
+  # `/bin/package.json`.
+
+  - package-ecosystem: cargo
+    directory: /fendd
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps):"
+
+  - package-ecosystem: cargo
+    directory: /linux
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps):"
+
+  - package-ecosystem: swift
+    directory: /swift
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(deps):"
