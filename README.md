@@ -281,17 +281,16 @@ Publishing requires Developer ID signing + Apple notarization — Apple Virtuali
 
 ## Roadmap
 
-- **Now:** macOS Apple Silicon. Polishing for the first public release (proper npm distribution, Developer ID notarization, end-to-end soak on real projects).
-- **Next:** macOS Intel.
-- **Then:** Linux via KVM/QEMU first, with a smaller custom backend evaluated later. See [`docs/linux-backend.md`](./docs/linux-backend.md).
-- **Linux path in progress:** Linux host work lives separately in Rust under
-  `linux/`; the crate now exposes both `fend-linux` and a Linux `fend`
-  binary, supports `fend doctor`, `fend setup`, disposable `fend <command>`
-  runs, automatic fallback from missing `passt` to QEMU user networking, and
-  real guest command execution with QEMU/KVM and `virtiofsd`. Packaging and
-  local install verification are wired for `@fendsh/cli-linux-x64` in the
-  repo, but the Linux npm path is not published yet.
-- **Future:** Windows (WSL2), AI-assisted package review via `agent-ws`, macOS app with secrets vault and dashboard, IDE integration.
+- Fend is focused on a solid macOS Apple Silicon alpha first: npm
+  distribution, Developer ID signing, notarization, and real-project soak.
+- macOS Intel is the next platform candidate after the Apple Silicon alpha is
+  stable.
+- Linux host work is active in Rust under `linux/`, but the release path is
+  still macOS-first today.
+- Windows and AI-assisted review remain future work.
+
+See [docs/ROADMAP.md](./docs/ROADMAP.md) for the roadmap summary and
+[docs/linux-backend.md](./docs/linux-backend.md) for the detailed Linux plan.
 
 Issues, bug reports, and PRs welcome.
 
