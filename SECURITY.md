@@ -17,9 +17,7 @@ Preferred channel:
 
 Fallback channel:
 
-- Email `security@<domain>`
-
-<!-- TODO: replace security@<domain> with a real monitored security inbox before release. -->
+- Email `security@fend.sh`
 
 Please include:
 
