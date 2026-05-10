@@ -63,7 +63,7 @@ pub enum CommandNetworkMode {
     Off,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunOptions {
     pub runtime_dir: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
@@ -79,27 +79,6 @@ pub struct RunOptions {
     pub env: BTreeMap<String, String>,
     pub network: Option<CommandNetworkMode>,
     pub command: Vec<String>,
-}
-
-impl Default for RunOptions {
-    fn default() -> Self {
-        Self {
-            runtime_dir: None,
-            workspace: None,
-            cache_dir: None,
-            tools_dir: None,
-            run_dir: None,
-            guest_cid: None,
-            cpus: None,
-            memory_mib: None,
-            vm_network: None,
-            timeout_secs: None,
-            cwd: None,
-            env: BTreeMap::new(),
-            network: None,
-            command: Vec::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

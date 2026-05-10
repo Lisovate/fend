@@ -463,10 +463,8 @@ fn signal_loop(fd: OwnedFd, writer: &mut VsockStream, tty: bool, stop: Arc<Atomi
         let info = unsafe { info.assume_init() };
         let signal = info.ssi_signo as i32;
         match signal {
-            libc::SIGINT | libc::SIGTERM => {
-                if send_signal(writer, signal).is_err() {
-                    break;
-                }
+            libc::SIGINT | libc::SIGTERM if send_signal(writer, signal).is_err() => {
+                break;
             }
             libc::SIGWINCH if tty => {
                 if let Some((rows, cols)) = current_window_size() {
@@ -758,7 +756,7 @@ fn io_or_startup_timeout(error: std::io::Error, timeout: Duration) -> SessionErr
 fn session_error_to_io(error: SessionError) -> std::io::Error {
     match error {
         SessionError::Io(error) => error,
-        other => std::io::Error::new(std::io::ErrorKind::Other, other.to_string()),
+        other => std::io::Error::other(other.to_string()),
     }
 }
 

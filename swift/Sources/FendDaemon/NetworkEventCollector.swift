@@ -52,19 +52,20 @@ public final class NetworkEventCollector: @unchecked Sendable {
 
     private func monitorOnce() {
         let semaphore = DispatchSemaphore(value: 0)
-        var connResult: Result<VZVirtioSocketConnection, Error>?
+        let connResult = ResultBox<VZVirtioSocketConnection>()
 
         Task {
             do {
-                connResult = .success(try await vm.connectToGuest(port: vsockPortNetworkEvents))
+                let conn = try await vm.connectToGuest(port: vsockPortNetworkEvents)
+                connResult.set(.success(conn))
             } catch {
-                connResult = .failure(error)
+                connResult.set(.failure(error))
             }
             semaphore.signal()
         }
 
         guard semaphore.wait(timeout: .now() + .seconds(2)) == .success,
-              let result = connResult,
+              let result = connResult.get(),
               case .success(let conn) = result else {
             lock.withLock { running = false }
             return

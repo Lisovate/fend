@@ -200,8 +200,7 @@ fn send_network_event(stream: &mut VsockStream, conn: &Conn) -> std::io::Result<
         port: conn.port,
         state: conn.state.clone(),
     };
-    let json =
-        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec(&msg).map_err(std::io::Error::other)?;
     write_frame(stream, MessageType::NetworkEvent, &json)
 }
 

@@ -152,8 +152,7 @@ fn send_port_event(stream: &mut VsockStream, port: u16, event: &str) -> std::io:
         port,
         event: event.to_string(),
     };
-    let json =
-        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec(&msg).map_err(std::io::Error::other)?;
     write_frame(stream, MessageType::PortEvent, &json)
 }
 

@@ -363,8 +363,7 @@ fn send_output(
         stream: stream.to_string(),
         data: base64_encode(data),
     };
-    let json =
-        serde_json::to_vec(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec(&msg).map_err(std::io::Error::other)?;
     let mut w = writer.lock().unwrap();
     write_frame(&mut *w, MessageType::OutputData, &json)
 }
