@@ -2,7 +2,7 @@ import Foundation
 @preconcurrency import Virtualization
 import FendCommon
 
-private final class ResultBox<T>: @unchecked Sendable {
+final class ResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Result<T, Error>?
 
@@ -10,6 +10,12 @@ private final class ResultBox<T>: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         value = result
+    }
+
+    func get() -> Result<T, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 
     func force() throws -> T {

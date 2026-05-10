@@ -61,19 +61,20 @@ public final class PortForwarder: @unchecked Sendable {
             }
 
             let semaphore = DispatchSemaphore(value: 0)
-            var connResult: Result<VZVirtioSocketConnection, Error>?
+            let connResult = ResultBox<VZVirtioSocketConnection>()
 
             Task {
                 do {
-                    connResult = .success(try await self.vm.connectToGuest(port: vsockPortEvents))
+                    let conn = try await self.vm.connectToGuest(port: vsockPortEvents)
+                    connResult.set(.success(conn))
                 } catch {
-                    connResult = .failure(error)
+                    connResult.set(.failure(error))
                 }
                 semaphore.signal()
             }
             semaphore.wait()
 
-            guard let result = connResult, case .success(let conn) = result else {
+            guard let result = connResult.get(), case .success(let conn) = result else {
                 let jitter = Double.random(in: 0.8...1.2)
                 Thread.sleep(forTimeInterval: currentDelay * jitter)
                 currentDelay = min(currentDelay * 2, maxDelay)
@@ -244,19 +245,20 @@ private final class PortProxy: @unchecked Sendable {
         defer { Darwin.close(clientFd) }
 
         let semaphore = DispatchSemaphore(value: 0)
-        var connResult: Result<VZVirtioSocketConnection, Error>?
+        let connResult = ResultBox<VZVirtioSocketConnection>()
 
         Task {
             do {
-                connResult = .success(try await self.vm.connectToGuest(port: vsockPortForward))
+                let conn = try await self.vm.connectToGuest(port: vsockPortForward)
+                connResult.set(.success(conn))
             } catch {
-                connResult = .failure(error)
+                connResult.set(.failure(error))
             }
             semaphore.signal()
         }
         semaphore.wait()
 
-        guard let result = connResult, case .success(let vsockConn) = result else { return }
+        guard let result = connResult.get(), case .success(let vsockConn) = result else { return }
         let vsockFd = vsockConn.fileDescriptor
 
         var portBE = hostPort.bigEndian
