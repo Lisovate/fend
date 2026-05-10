@@ -432,10 +432,10 @@ fn build_tools_path() -> String {
                 if entry.path().join("bun").exists() {
                     paths.push(entry.path().to_string_lossy().to_string());
                 }
-            } else if name_str == "claude" || name_str.starts_with("claude-") {
-                if entry.path().join("claude").exists() {
-                    paths.push(entry.path().to_string_lossy().to_string());
-                }
+            } else if (name_str == "claude" || name_str.starts_with("claude-"))
+                && entry.path().join("claude").exists()
+            {
+                paths.push(entry.path().to_string_lossy().to_string());
             }
         }
     }

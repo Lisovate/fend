@@ -2,6 +2,26 @@ import Foundation
 @preconcurrency import Virtualization
 import FendCommon
 
+private final class ResultBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<T, Error>?
+
+    func set(_ result: Result<T, Error>) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = result
+    }
+
+    func force() throws -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let result = value else {
+            throw FendError.connectionError("internal: result not set after semaphore signal")
+        }
+        return try result.get()
+    }
+}
+
 /// The fend daemon manages VM lifecycles, one VM per project directory.
 /// It listens on a Unix domain socket for CLI requests and relays
 /// commands to fendd inside the VM.
@@ -158,15 +178,15 @@ public final class Daemon {
 
         // Get or create VM (async bridge, with timeout)
         let semaphore = DispatchSemaphore(value: 0)
-        var vmResult: Result<VMInstance, Error>!
+        let vmResult = ResultBox<VMInstance>()
 
         Task {
             do {
                 let vm = try await self.vmManager.vmForProject(projectDir, config: config)
                 try await vm.waitForReady()
-                vmResult = .success(vm)
+                vmResult.set(.success(vm))
             } catch {
-                vmResult = .failure(error)
+                vmResult.set(.failure(error))
             }
             semaphore.signal()
         }
@@ -177,20 +197,21 @@ public final class Daemon {
 
         let vmInstance: VMInstance
         do {
-            vmInstance = try vmResult.get()
+            vmInstance = try vmResult.force()
         } catch {
             sendDaemonError(fd: clientFd, message: "VM boot failed: \(error)")
             return
         }
 
         // Connect to fendd over vsock (async bridge, with timeout)
-        var connResult: Result<VZVirtioSocketConnection, Error>!
+        let connResult = ResultBox<VZVirtioSocketConnection>()
         let sem2 = DispatchSemaphore(value: 0)
         Task {
             do {
-                connResult = .success(try await vmInstance.connectToGuest(port: vsockPort))
+                let conn = try await vmInstance.connectToGuest(port: vsockPort)
+                connResult.set(.success(conn))
             } catch {
-                connResult = .failure(error)
+                connResult.set(.failure(error))
             }
             sem2.signal()
         }
@@ -201,7 +222,7 @@ public final class Daemon {
 
         let vsockConn: VZVirtioSocketConnection
         do {
-            vsockConn = try connResult.get()
+            vsockConn = try connResult.force()
         } catch {
             sendDaemonError(fd: clientFd, message: "vsock connect failed: \(error)")
             return

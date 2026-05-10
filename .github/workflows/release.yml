@@ -1,0 +1,278 @@
+name: Release
+
+# Triggered on annotated tag push (e.g., v0.1.0-alpha.1).
+# Builds signed/notarized macOS arm64 + Linux x64 binaries, then publishes
+# all three npm packages with Sigstore provenance and creates a GitHub release.
+#
+# ────────────────────────────────────────────────────────────────────
+# BEFORE FIRST USE — required GitHub secrets (Settings → Secrets → Actions):
+#
+#   APPLE_DEVELOPER_ID_CERT_P12_BASE64   base64-encoded P12 export of the
+#                                        Developer ID Application cert
+#                                        (Keychain Access → right-click cert
+#                                         → Export → .p12 → base64 -i cert.p12)
+#   APPLE_DEVELOPER_ID_CERT_P12_PASSWORD password used during P12 export
+#   APPLE_ID                             paweljlisowski@icloud.com
+#   APPLE_TEAM_ID                        487XSFNFDS
+#   APPLE_APP_SPECIFIC_PASSWORD          appleid.apple.com → Sign-In and
+#                                        Security → App-Specific Passwords
+#   NPM_TOKEN                            npmjs.com → Access Tokens → Granular
+#                                        token with publish rights on @fendsh/*
+#
+# Action SHAs match .github/workflows/ci.yml. Pin any new ones before merging.
+# ────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write       # for creating the GitHub Release
+  id-token: write       # for npm Sigstore provenance via OIDC
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Job 1 — macOS arm64: build, Developer-ID-sign, notarize
+  # ────────────────────────────────────────────────────────────────
+  build-darwin-arm64:
+    name: build-darwin-arm64
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Swift
+        uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2.4.0
+        with:
+          swift-version: "5.10"
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+
+          echo -n "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          security import "$CERT_PATH" \
+            -P "$CERT_P12_PASSWORD" \
+            -k "$KEYCHAIN_PATH" \
+            -T /usr/bin/codesign
+
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH"
+
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | sed -e 's/"//g')
+
+          rm -f "$CERT_PATH"
+
+      - name: Build, sign, and notarize
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          swift build -c release --package-path swift
+
+          PLATFORM_DIR="packages/cli-darwin-arm64/bin"
+          mkdir -p "$PLATFORM_DIR"
+          cp swift/.build/release/fend "$PLATFORM_DIR/fend"
+          chmod +x "$PLATFORM_DIR/fend"
+          BINARY="$PLATFORM_DIR/fend"
+
+          SIGN_IDENTITY=$(security find-identity -p codesigning -v \
+            | grep "Developer ID Application:" \
+            | grep "($APPLE_TEAM_ID)" \
+            | head -1 \
+            | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p')
+
+          if [ -z "$SIGN_IDENTITY" ]; then
+            echo "no Developer ID identity for team $APPLE_TEAM_ID in keychain" >&2
+            security find-identity -p codesigning -v >&2
+            exit 1
+          fi
+
+          codesign --force \
+            --sign "$SIGN_IDENTITY" \
+            --entitlements swift/fend.entitlements \
+            --options runtime \
+            --timestamp \
+            "$BINARY"
+          codesign --verify --strict "$BINARY"
+
+          ZIP_PATH="$RUNNER_TEMP/fend.zip"
+          ditto -c -k --keepParent "$BINARY" "$ZIP_PATH"
+
+          xcrun notarytool submit "$ZIP_PATH" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+
+          rm -f "$ZIP_PATH"
+          codesign -dv "$BINARY"
+
+      - name: Upload darwin-arm64 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-darwin-arm64
+          path: packages/cli-darwin-arm64/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 2 — Linux x64: build host fend (musl) + guest fendd (aarch64-musl)
+  # ────────────────────────────────────────────────────────────────
+  build-linux-x64:
+    name: build-linux-x64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            linux -> target
+            fendd -> target
+
+      - name: Build host (x86_64-musl) and guest (aarch64-musl)
+        run: |
+          set -euo pipefail
+
+          cargo build --manifest-path linux/Cargo.toml \
+            --release --target x86_64-unknown-linux-musl --bin fend
+          cargo build --manifest-path fendd/Cargo.toml \
+            --release --target aarch64-unknown-linux-musl --bin fendd
+
+          PLATFORM_DIR="packages/cli-linux-x64"
+          mkdir -p "$PLATFORM_DIR/bin" "$PLATFORM_DIR/libexec"
+          cp "linux/target/x86_64-unknown-linux-musl/release/fend" "$PLATFORM_DIR/bin/fend"
+          cp "fendd/target/aarch64-unknown-linux-musl/release/fendd" "$PLATFORM_DIR/libexec/fendd"
+          chmod +x "$PLATFORM_DIR/bin/fend" "$PLATFORM_DIR/libexec/fendd"
+
+      - name: Upload linux-x64 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: cli-linux-x64
+          path: packages/cli-linux-x64/
+          retention-days: 7
+
+  # ────────────────────────────────────────────────────────────────
+  # Job 3 — publish all three packages to npm with provenance,
+  #          then create the GitHub release
+  # ────────────────────────────────────────────────────────────────
+  publish:
+    name: publish
+    needs: [build-darwin-arm64, build-linux-x64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download darwin-arm64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-darwin-arm64
+          path: packages/cli-darwin-arm64/
+
+      - name: Download linux-x64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: cli-linux-x64
+          path: packages/cli-linux-x64/
+
+      - name: Verify artifacts and version match
+        run: |
+          set -euo pipefail
+          test -x packages/cli-darwin-arm64/bin/fend
+          test -x packages/cli-linux-x64/bin/fend
+          test -x packages/cli-linux-x64/libexec/fendd
+
+          ROOT_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          if [ "$ROOT_VERSION" != "$TAG_VERSION" ]; then
+            echo "tag $TAG_VERSION does not match package.json version $ROOT_VERSION" >&2
+            exit 1
+          fi
+
+          DARWIN_VERSION=$(node -p "require('./packages/cli-darwin-arm64/package.json').version")
+          LINUX_VERSION=$(node -p "require('./packages/cli-linux-x64/package.json').version")
+          if [ "$DARWIN_VERSION" != "$ROOT_VERSION" ] || [ "$LINUX_VERSION" != "$ROOT_VERSION" ]; then
+            echo "platform package versions do not match root ($ROOT_VERSION)" >&2
+            exit 1
+          fi
+
+      - name: Determine npm dist-tag
+        id: tag
+        run: |
+          TAG_REF="${GITHUB_REF#refs/tags/}"
+          if [[ "$TAG_REF" == *"-alpha"* ]]; then
+            echo "tag=alpha" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG_REF" == *"-beta"* ]]; then
+            echo "tag=beta" >> "$GITHUB_OUTPUT"
+          elif [[ "$TAG_REF" == *"-rc"* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish @fendsh/cli-darwin-arm64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages/cli-darwin-arm64
+        run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
+
+      - name: Publish @fendsh/cli-linux-x64
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: packages/cli-linux-x64
+        run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
+
+      - name: Publish @fendsh/cli (root)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_REF="${GITHUB_REF#refs/tags/}"
+          ARGS=("$TAG_REF" --title "$TAG_REF" --generate-notes)
+          if [ "$TAG_NAME" != "latest" ]; then
+            ARGS+=(--prerelease)
+          fi
+          gh release create "${ARGS[@]}"

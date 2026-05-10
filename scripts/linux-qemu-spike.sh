@@ -279,10 +279,10 @@ start_virtiofsd tools "${TOOLS_DIR}" "${TOOLS_SOCKET}"
 NET_ARGS=()
 case "${NETWORK}" in
     passt)
-        NET_ARGS=(-netdev passt,id=net0 -device virtio-net-pci,netdev=net0)
+        NET_ARGS=(-netdev "passt,id=net0" -device "virtio-net-pci,netdev=net0")
         ;;
     user)
-        NET_ARGS=(-netdev user,id=net0 -device virtio-net-pci,netdev=net0)
+        NET_ARGS=(-netdev "user,id=net0" -device "virtio-net-pci,netdev=net0")
         ;;
     off)
         ;;

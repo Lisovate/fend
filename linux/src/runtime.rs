@@ -401,11 +401,7 @@ fn installed_runtimes(
 }
 
 fn parse_runtime_entry(name: &str, prefix: &str, platform_suffix: &str) -> Option<String> {
-    let version = if let Some(version) = name.strip_prefix(prefix) {
-        version
-    } else {
-        return None;
-    };
+    let version = name.strip_prefix(prefix)?;
 
     let version = version
         .strip_suffix(&format!("-{platform_suffix}"))

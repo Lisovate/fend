@@ -60,12 +60,7 @@ pub fn handle(conn: VsockStream) {
     };
     let command_id = cmd.id;
 
-    loop {
-        let (msg_type, payload) = match read_frame(&mut reader) {
-            Ok(frame) => frame,
-            Err(_) => break,
-        };
-
+    while let Ok((msg_type, payload)) = read_frame(&mut reader) {
         match msg_type {
             MessageType::InputData => {
                 if let Ok(input) = serde_json::from_slice::<InputData>(&payload) {
