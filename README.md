@@ -1,4 +1,4 @@
-![CI](https://github.com/Lisovate/fend/actions/workflows/ci.yml/badge.svg) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Platform: macOS%20arm64](https://img.shields.io/badge/platform-macOS%20arm64-111827) ![Status: alpha](https://img.shields.io/badge/status-alpha-f59e0b)
+![CI](https://github.com/Lisovate/fend/actions/workflows/ci.yml/badge.svg) [![npm](https://img.shields.io/npm/v/@fendsh/cli/alpha?label=npm)](https://www.npmjs.com/package/@fendsh/cli) [![downloads](https://img.shields.io/npm/dm/@fendsh/cli?label=downloads%2Fmonth)](https://www.npmjs.com/package/@fendsh/cli) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg) ![Platform: macOS%20arm64](https://img.shields.io/badge/platform-macOS%20arm64-111827) ![Status: alpha](https://img.shields.io/badge/status-alpha-f59e0b)
 
 # fend
 
@@ -13,14 +13,13 @@ fend audit              # OSV.dev advisory check across the lockfile
 fend audit --fix        # propose + apply safe upgrades
 ```
 
-> **Status: alpha.** macOS Apple Silicon is the only released platform today.
-> The Swift CLI, the Rust guest agent, the warm-VM daemon, port forwarding,
-> the shell hook, and the audit flow all work end-to-end there. Linux x86_64
-> now has a working Rust `fend` path with real QEMU/KVM validation on Arch,
-> automatic first-run runtime setup, disposable command execution, working
-> `npm run dev` port forwarding, and a real npm pack/install workflow in the
-> repo, but that Linux path is not published or supported as a release yet.
-> Windows remains roadmap-only.
+> **Status: alpha.** macOS Apple Silicon is the only released platform today
+> — `npm install -g @fendsh/cli` gets you a Developer ID signed and Apple
+> notarized binary. The Swift CLI, the Rust guest agent, the warm-VM daemon,
+> port forwarding, the shell hook, and the audit flow all work end-to-end.
+> Linux x86_64 has a working Rust path in the repo (real QEMU/KVM validation
+> on Arch, runtime bootstrap, port forwarding, npm pack/install) but is not
+> yet published. Windows remains roadmap-only.
 
 ---
 
@@ -38,13 +37,14 @@ This is the browser security model applied to local development.
 
 ## Quickstart
 
-```bash
-# macOS from source (see "Build from source" below)
-make -C swift sign
-sudo cp swift/.build/release/fend /usr/local/bin/fend
+Requires macOS 13+ on Apple Silicon and Node.js 18+ for the npm install path.
 
-# first run auto-prepares the guest runtime (~1.5 GB today on Linux because
-# rootfs.img is built locally with Docker; cached afterward in ~/.fend/runtime)
+```bash
+# install — signed and Apple notarized binary
+npm install -g @fendsh/cli
+
+# first run auto-prepares the guest runtime (~1.5 GB, one-time, cached in
+# ~/.fend/runtime/ after that)
 fend npm install
 
 # everything else is just `fend <command>`
@@ -52,6 +52,13 @@ fend npm run dev        # dev server runs in the VM, port 3000 forwards to host
 fend npm test
 fend node scripts/seed.js
 fend --network off npm test
+```
+
+Verify the install:
+
+```bash
+fend --version          # 0.1.0-alpha.1
+fend doctor             # checks kernel, runtime, daemon, config
 ```
 
 ### Shell hook (no prefix)
@@ -240,9 +247,8 @@ For deep architecture detail — VM lifecycle, scenarios, file-watching/HMR stra
 You'll need Xcode 15+ (Swift 5.9+), Rust, and Docker.
 
 ```bash
-# Swift CLI + daemon
-make -C swift sign       # builds release binary, ad-hoc codesigns with the
-                         # virtualization entitlement
+# Swift CLI + daemon (ad-hoc signed for local dev)
+FEND_AD_HOC=1 ./scripts/build-binary.sh
 swift/.build/release/fend --help
 
 # Rust guest agent (cross-compiled to aarch64-musl, baked into the rootfs)
@@ -250,6 +256,7 @@ cd fendd && cargo build --release --target aarch64-unknown-linux-musl
 
 # Run tests
 swift test --package-path swift
+cargo test --manifest-path fendd/Cargo.toml
 ```
 
 On macOS, the first `fend <anything>` call runs `swift/scripts/prepare-runtime.sh`
@@ -260,22 +267,27 @@ that flow: `fend setup` prepares `~/.fend/runtime/linux-x86_64`, and normal
 ### Packaging for npm
 
 `scripts/build-binary.sh` stages the macOS Apple Silicon binary into
-`packages/cli-darwin-arm64/bin/`. `scripts/build-linux-binary.sh` stages the
-Linux x64 host `fend` binary plus the packaged `fendd` guest agent into
-`packages/cli-linux-x64/`. The JS wrapper at `bin/fend.js` resolves the right
-platform package via npm's `optionalDependencies`, falling back to monorepo
-artifacts during local development.
+`packages/cli-darwin-arm64/bin/`, signing with Developer ID + hardened runtime
++ RFC 3161 timestamp + Apple notarization by default. Set `FEND_AD_HOC=1` for
+local dev (no Developer ID needed) or `FEND_SKIP_NOTARIZE=1` to skip the
+Apple submission round-trip while iterating.
+
+`scripts/build-linux-binary.sh` stages the Linux x64 host `fend` binary plus
+the packaged `fendd` guest agent into `packages/cli-linux-x64/`. The JS wrapper
+at `bin/fend.js` resolves the right platform package via npm's
+`optionalDependencies`, falling back to monorepo artifacts during local
+development.
 
 For local release verification:
 
-- `./scripts/pack-npm.sh --platform linux-x64` builds/stages the Linux binaries
-  and emits the root + platform `.tgz` packages.
-- `./scripts/test-linux-npm-package.sh` installs those tarballs into a throwaway
-  npm prefix and verifies the installed `fend` wrapper end to end.
-- `./scripts/publish-npm.sh --platform linux-x64 --dry-run` checks the publish
-  order and package contents without touching the registry.
+- `./scripts/pack-npm.sh --platform darwin-arm64` builds/stages binaries and
+  emits the root + platform `.tgz` packages.
+- `./scripts/publish-npm.sh --platform darwin-arm64 --dry-run` checks the
+  publish order and package contents without touching the registry.
 
-Publishing requires Developer ID signing + Apple notarization — Apple Virtualization entitlements are otherwise rejected at runtime on end-user machines. The current build script only ad-hoc signs.
+The tag-triggered `.github/workflows/release.yml` runs the same flow in CI
+with npm Sigstore provenance attached (`docs/RELEASING.md` documents the
+required GitHub secrets and the full release procedure).
 
 ---
 
