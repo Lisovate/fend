@@ -56,6 +56,10 @@ where
             );
             Ok(ExitCode::SUCCESS)
         }
+        CliCommand::Version => {
+            println!("{program} {}", env!("CARGO_PKG_VERSION"));
+            Ok(ExitCode::SUCCESS)
+        }
         CliCommand::Doctor(options) => {
             let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
             let runtime_dir = resolve_doctor_runtime_dir(&options, &defaults);
