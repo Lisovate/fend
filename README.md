@@ -57,7 +57,7 @@ fend --network off npm test
 Verify the install:
 
 ```bash
-fend --version          # 0.1.0-alpha.1
+fend --version          # 0.1.0-alpha.2
 fend doctor             # checks kernel, runtime, daemon, config
 ```
 
