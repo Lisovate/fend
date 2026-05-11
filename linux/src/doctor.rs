@@ -1,10 +1,17 @@
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::qemu::{NetworkMode, RuntimeArtifacts};
 use crate::tools::{resolve_virtiofsd, ResolvedVirtiofsd};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceError {
+    PermissionDenied,
+    NoDevice,
+    Other(i32),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceStatus {
@@ -12,6 +19,7 @@ pub struct DeviceStatus {
     pub exists: bool,
     pub readable: bool,
     pub writable: bool,
+    pub error: Option<DeviceError>,
 }
 
 impl DeviceStatus {
@@ -22,7 +30,11 @@ impl DeviceStatus {
         if self.readable && self.writable {
             return self.path.display().to_string();
         }
-        "permission denied".to_string()
+        match self.error {
+            Some(DeviceError::NoDevice) => "no driver (module not loaded?)".to_string(),
+            Some(DeviceError::Other(errno)) => format!("inaccessible (errno {errno})"),
+            Some(DeviceError::PermissionDenied) | None => "permission denied".to_string(),
+        }
     }
 }
 
@@ -208,19 +220,13 @@ fn evaluate_with_options(probe: &HostProbe, options: ReportOptions) -> DoctorRep
             "/dev/kvm is missing. Enable virtualization and load the KVM module.".to_string(),
         );
     } else if !probe.kvm.readable || !probe.kvm.writable {
-        issues.push(
-            "Current user cannot access /dev/kvm. Add the user to the kvm group and log in again."
-                .to_string(),
-        );
+        issues.push(kvm_access_issue(probe.kvm.error));
     }
 
     if !probe.vhost_vsock.exists {
         issues.push("/dev/vhost-vsock is missing. Try: sudo modprobe vhost_vsock.".to_string());
     } else if !probe.vhost_vsock.readable || !probe.vhost_vsock.writable {
-        issues.push(
-            "Current user cannot access /dev/vhost-vsock. Check device permissions or group membership."
-                .to_string(),
-        );
+        issues.push(vhost_vsock_access_issue(probe.vhost_vsock.error));
     }
 
     if artifacts_missing {
@@ -388,11 +394,76 @@ fn process_succeeds(program: &str, args: &[&str]) -> bool {
 fn device_status(path: impl AsRef<Path>) -> DeviceStatus {
     let path = path.as_ref().to_path_buf();
     let exists = path.exists();
-    DeviceStatus {
-        readable: exists && File::open(&path).is_ok(),
-        writable: exists && OpenOptions::new().write(true).open(&path).is_ok(),
-        path,
-        exists,
+    if !exists {
+        return DeviceStatus {
+            path,
+            exists,
+            readable: false,
+            writable: false,
+            error: None,
+        };
+    }
+    match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(_) => DeviceStatus {
+            path,
+            exists,
+            readable: true,
+            writable: true,
+            error: None,
+        },
+        Err(err) => {
+            let raw = err.raw_os_error().unwrap_or(0);
+            let kind = if raw == libc::EACCES || raw == libc::EPERM {
+                DeviceError::PermissionDenied
+            } else if raw == libc::ENODEV || raw == libc::ENXIO {
+                DeviceError::NoDevice
+            } else {
+                DeviceError::Other(raw)
+            };
+            DeviceStatus {
+                path,
+                exists,
+                readable: false,
+                writable: false,
+                error: Some(kind),
+            }
+        }
+    }
+}
+
+fn kvm_access_issue(error: Option<DeviceError>) -> String {
+    match error {
+        Some(DeviceError::NoDevice) => {
+            "/dev/kvm exists but has no driver behind it. Load the KVM module \
+             (e.g. sudo modprobe kvm-intel or sudo modprobe kvm-amd). If you just \
+             upgraded the kernel, reboot so modules match the running kernel."
+                .to_string()
+        }
+        Some(DeviceError::Other(errno)) => {
+            format!("/dev/kvm could not be opened (errno {errno}).")
+        }
+        Some(DeviceError::PermissionDenied) | None => {
+            "Current user cannot access /dev/kvm. Add the user to the kvm group and log in again."
+                .to_string()
+        }
+    }
+}
+
+fn vhost_vsock_access_issue(error: Option<DeviceError>) -> String {
+    match error {
+        Some(DeviceError::NoDevice) => {
+            "/dev/vhost-vsock exists but has no driver behind it. Load the module: \
+             sudo modprobe vhost_vsock. If you just upgraded the kernel, reboot so \
+             modules match the running kernel."
+                .to_string()
+        }
+        Some(DeviceError::Other(errno)) => {
+            format!("/dev/vhost-vsock could not be opened (errno {errno}).")
+        }
+        Some(DeviceError::PermissionDenied) | None => {
+            "Current user cannot access /dev/vhost-vsock. Check device permissions or group membership."
+                .to_string()
+        }
     }
 }
 
@@ -552,12 +623,14 @@ mod tests {
             exists: true,
             readable: false,
             writable: false,
+            error: Some(DeviceError::PermissionDenied),
         };
         probe.vhost_vsock = DeviceStatus {
             path: PathBuf::from("/dev/vhost-vsock"),
             exists: false,
             readable: false,
             writable: false,
+            error: None,
         };
 
         let report = evaluate(&probe);
@@ -664,6 +737,7 @@ mod tests {
             exists: false,
             readable: false,
             writable: false,
+            error: None,
         };
 
         let report = evaluate(&probe);
@@ -683,6 +757,7 @@ mod tests {
             exists: true,
             readable: false,
             writable: false,
+            error: Some(DeviceError::PermissionDenied),
         };
 
         let report = evaluate_launch(&probe, NetworkMode::Off);
@@ -694,6 +769,79 @@ mod tests {
         assert_eq!(
             field(&report, "/dev/vhost-vsock"),
             Some("permission denied")
+        );
+    }
+
+    #[test]
+    fn vhost_vsock_no_device_suggests_module_load_or_reboot() {
+        let mut probe = linux_probe();
+        probe.vhost_vsock = DeviceStatus {
+            path: PathBuf::from("/dev/vhost-vsock"),
+            exists: true,
+            readable: false,
+            writable: false,
+            error: Some(DeviceError::NoDevice),
+        };
+
+        let report = evaluate_launch(&probe, NetworkMode::Off);
+
+        assert_contains(
+            &report.issues,
+            "/dev/vhost-vsock exists but has no driver behind it. Load the module: \
+             sudo modprobe vhost_vsock. If you just upgraded the kernel, reboot so \
+             modules match the running kernel.",
+        );
+        assert_eq!(
+            field(&report, "/dev/vhost-vsock"),
+            Some("no driver (module not loaded?)")
+        );
+    }
+
+    #[test]
+    fn kvm_no_device_suggests_module_load_or_reboot() {
+        let mut probe = linux_probe();
+        probe.kvm = DeviceStatus {
+            path: PathBuf::from("/dev/kvm"),
+            exists: true,
+            readable: false,
+            writable: false,
+            error: Some(DeviceError::NoDevice),
+        };
+
+        let report = evaluate(&probe);
+
+        assert_contains(
+            &report.issues,
+            "/dev/kvm exists but has no driver behind it. Load the KVM module \
+             (e.g. sudo modprobe kvm-intel or sudo modprobe kvm-amd). If you just \
+             upgraded the kernel, reboot so modules match the running kernel.",
+        );
+        assert_eq!(
+            field(&report, "/dev/kvm"),
+            Some("no driver (module not loaded?)")
+        );
+    }
+
+    #[test]
+    fn device_with_unknown_errno_reports_raw_errno() {
+        let mut probe = linux_probe();
+        probe.vhost_vsock = DeviceStatus {
+            path: PathBuf::from("/dev/vhost-vsock"),
+            exists: true,
+            readable: false,
+            writable: false,
+            error: Some(DeviceError::Other(5)),
+        };
+
+        let report = evaluate_launch(&probe, NetworkMode::Off);
+
+        assert_contains(
+            &report.issues,
+            "/dev/vhost-vsock could not be opened (errno 5).",
+        );
+        assert_eq!(
+            field(&report, "/dev/vhost-vsock"),
+            Some("inaccessible (errno 5)")
         );
     }
 
@@ -753,12 +901,14 @@ mod tests {
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             vhost_vsock: DeviceStatus {
                 path: PathBuf::from("/dev/vhost-vsock"),
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             cpu_virtualization_available: Some(true),
         }

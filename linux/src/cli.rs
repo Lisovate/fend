@@ -1225,12 +1225,14 @@ mod tests {
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             vhost_vsock: DeviceStatus {
                 path: PathBuf::from("/dev/vhost-vsock"),
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             cpu_virtualization_available: Some(true),
         });
