@@ -16,6 +16,7 @@ use crate::tools::resolve_virtiofsd;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     Help(HelpTopic),
+    Version,
     Doctor(DoctorOptions),
     Setup(SetupOptions),
     Plan(PlanOptions),
@@ -198,7 +199,7 @@ pub fn usage() -> String {
 
 pub fn usage_for(program: &str) -> String {
     format!(
-        "usage: {program} <subcommand> [options]\n       {program} [run options] -- <command> [args...]\n       {program} [run options] <command> [args...]\n\nsubcommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  setup       Prepare Linux runtime artifacts in ~/.fend/runtime.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  run         Launch a disposable VM, run one command, and tear it down.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n\nIf no subcommand is given, {program} treats the remaining arguments as a sandboxed command to run.\n"
+        "usage: {program} <subcommand> [options]\n       {program} [run options] -- <command> [args...]\n       {program} [run options] <command> [args...]\n\nsubcommands:\n  doctor      Check Linux host prerequisites and runtime artifacts.\n  setup       Prepare Linux runtime artifacts in ~/.fend/runtime.\n  plan        Print the QEMU and virtiofsd launch plan without starting a VM.\n  launch      Start virtiofsd sidecars and QEMU from the Rust Linux host path.\n  run         Launch a disposable VM, run one command, and tear it down.\n  stop        Stop a running QEMU/virtiofsd stack from its run dir.\n  smoke       Verify host-to-fendd vsock command execution after a VM boots.\n\ncommon options:\n  -h, --help\n  -V, --version\n\nIf no subcommand is given, {program} treats the remaining arguments as a sandboxed command to run.\n"
     )
 }
 
@@ -284,6 +285,7 @@ where
 
     match command.as_str() {
         "-h" | "--help" | "help" => Ok(CliCommand::Help(HelpTopic::General)),
+        "-V" | "--version" | "version" => Ok(CliCommand::Version),
         "doctor" => parse_doctor(args),
         "setup" => parse_setup(args),
         "plan" => parse_plan(args),
@@ -977,6 +979,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_version_flag_and_subcommand() {
+        assert_eq!(parse_args(["--version"]).unwrap(), CliCommand::Version);
+        assert_eq!(parse_args(["-V"]).unwrap(), CliCommand::Version);
+        assert_eq!(parse_args(["version"]).unwrap(), CliCommand::Version);
+    }
+
+    #[test]
     fn parses_stop_with_options() {
         assert_eq!(
             parse_args(["stop", "--help"]).unwrap(),
@@ -1225,12 +1234,14 @@ mod tests {
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             vhost_vsock: DeviceStatus {
                 path: PathBuf::from("/dev/vhost-vsock"),
                 exists: true,
                 readable: true,
                 writable: true,
+                error: None,
             },
             cpu_virtualization_available: Some(true),
         });
