@@ -1,6 +1,6 @@
 {
   "name": "@fendsh/cli",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Fend off risky dependencies. Sandboxed runtime for package installs and dev scripts.",
   "homepage": "https://fend.sh",
   "bin": {
@@ -19,8 +19,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@fendsh/cli-darwin-arm64": "0.1.0-alpha.1",
-    "@fendsh/cli-linux-x64": "0.1.0-alpha.1"
+    "@fendsh/cli-darwin-arm64": "0.1.0-alpha.2",
+    "@fendsh/cli-linux-x64": "0.1.0-alpha.2"
   },
   "keywords": [
     "security",

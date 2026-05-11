@@ -1,6 +1,6 @@
 {
   "name": "@fendsh/cli-linux-x64",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Native fend binary and guest agent for Linux x64. Installed automatically as an optional dependency of @fendsh/cli.",
   "homepage": "https://fend.sh",
   "files": [

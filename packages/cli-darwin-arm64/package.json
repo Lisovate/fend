@@ -1,6 +1,6 @@
 {
   "name": "@fendsh/cli-darwin-arm64",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Native fend binary for macOS Apple Silicon. Installed automatically as an optional dependency of @fendsh/cli.",
   "homepage": "https://fend.sh",
   "files": [
