@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Verify every version source in the repo matches the canonical version
+# (root package.json). Fend has 7+ files that must stay in tandem; the
+# v0.1.0-alpha.2 release shipped with three of them stale and a binary
+# whose --version reported the wrong string. This script is the guard.
+#
+# Run from anywhere: ./scripts/check-versions.sh
+#
+# Exit codes:
+#   0  all sources match the canonical version
+#   1  one or more sources drift; first column shows ✗ and the diff
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+CANONICAL=$(node -p "require('./package.json').version")
+
+fail=0
+
+check() {
+    local label="$1" actual="$2"
+    if [ "$actual" = "$CANONICAL" ]; then
+        printf '  %-50s %s\n' "$label" "$actual"
+    else
+        printf '✗ %-50s %s (expected %s)\n' "$label" "$actual" "$CANONICAL"
+        fail=1
+    fi
+}
+
+printf 'canonical version: %s\n\n' "$CANONICAL"
+
+check "package.json"                              "$(node -p "require('./package.json').version")"
+check "package-lock.json (root)"                  "$(node -p "require('./package-lock.json').version")"
+check "package-lock.json (package '')"            "$(node -p "require('./package-lock.json').packages[''].version")"
+check "packages/cli-darwin-arm64/package.json"    "$(node -p "require('./packages/cli-darwin-arm64/package.json').version")"
+check "packages/cli-linux-x64/package.json"       "$(node -p "require('./packages/cli-linux-x64/package.json').version")"
+
+# Cargo: take the [package] version. The lockfile mirrors it.
+check "linux/Cargo.toml"                          "$(awk -F'"' '/^version[[:space:]]*=/{print $2; exit}' linux/Cargo.toml)"
+check "linux/Cargo.lock (fend-linux)"             "$(awk -F'"' '/^name = "fend-linux"/{found=1; next} found && /^version[[:space:]]*=/{print $2; exit}' linux/Cargo.lock)"
+
+# Swift: argument-parser config takes a hardcoded string literal.
+check "swift/Sources/FendCLI/Fend.swift"          "$(awk -F'"' '/^[[:space:]]+version:/{print $2; exit}' swift/Sources/FendCLI/Fend.swift)"
+
+# README comment in the install-verify block.
+check "README.md (fend --version sample)"         "$(awk '/fend --version/{for(i=1;i<=NF;i++) if($i ~ /^[0-9]/) {print $i; exit}}' README.md)"
+
+# optionalDependencies pins on the root package.
+for pkg in cli-darwin-arm64 cli-linux-x64; do
+    pin=$(node -p "require('./package.json').optionalDependencies['@fendsh/${pkg}']")
+    check "optionalDependencies @fendsh/${pkg}"   "$pin"
+done
+
+# Same pins in the lockfile.
+for pkg in cli-darwin-arm64 cli-linux-x64; do
+    pin=$(node -p "(require('./package-lock.json').packages[''].optionalDependencies || {})['@fendsh/${pkg}']")
+    check "lockfile optionalDependencies @fendsh/${pkg}" "$pin"
+done
+
+printf '\n'
+
+if [ "$fail" -eq 1 ]; then
+    echo "Version drift detected. Bump every drifted source to ${CANONICAL} and re-run." >&2
+    exit 1
+fi
+
+echo "All version sources at ${CANONICAL}"

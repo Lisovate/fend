@@ -164,10 +164,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo build --manifest-path linux/Cargo.toml \
-            --release --target x86_64-unknown-linux-musl --bin fend
-          cargo build --manifest-path fendd/Cargo.toml \
-            --release --target aarch64-unknown-linux-musl --bin fendd
+          # cd into each crate so its .cargo/config.toml is picked up.
+          # fendd/.cargo/config.toml sets linker = "rust-lld" for the
+          # aarch64-musl cross — without this, host ld tries to link
+          # aarch64 objects and fails with "Relocations in generic ELF
+          # (EM: 183)". --manifest-path keeps cwd at the workspace root
+          # and silently bypasses the config.
+          (cd linux && cargo build --release --target x86_64-unknown-linux-musl --bin fend)
+          (cd fendd && cargo build --release --target aarch64-unknown-linux-musl --bin fendd)
 
           PLATFORM_DIR="packages/cli-linux-x64"
           mkdir -p "$PLATFORM_DIR/bin" "$PLATFORM_DIR/libexec"
@@ -263,6 +267,21 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
+
+      # Until 1.0, point `latest` at the newest prerelease so users
+      # following the README `npm install -g @fendsh/cli` quickstart
+      # get the current alpha instead of whatever shipped first.
+      # Drop this step once a non-prerelease tag (e.g. v1.0.0) lands.
+      - name: Move latest dist-tag to this prerelease
+        if: steps.tag.outputs.tag != 'latest'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          npm dist-tag add "@fendsh/cli@${VERSION}" latest
+          npm dist-tag add "@fendsh/cli-darwin-arm64@${VERSION}" latest
+          npm dist-tag add "@fendsh/cli-linux-x64@${VERSION}" latest
 
       - name: Create GitHub release
         env:
