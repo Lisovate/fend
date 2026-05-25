@@ -1,3 +1,4 @@
+use std::env;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
@@ -8,10 +9,12 @@ use crate::cli::{
     build_supervised_launch_config, doctor_usage_for, launch_usage_for, parse_args,
     plan_defaults_from_env, plan_usage_for, render_doctor_report, render_launch_plan,
     render_launch_summary, resolve_doctor_runtime_dir, resolve_plan_runtime_dir,
-    resolve_stop_run_dir, run_usage_for, setup_usage_for, smoke_usage_for, stop_usage_for,
-    usage_for, CliCommand, HelpTopic, SetupOptions,
+    resolve_stop_run_dir, run_usage_for, setup_usage_for, smoke_usage_for, status_usage_for,
+    stop_usage_for, usage_for, CliCommand, HelpTopic, SetupOptions, StopOptions,
 };
+use crate::client;
 use crate::doctor;
+use crate::ipc::{self, VmConfig};
 use crate::qemu::{self, LaunchConfig, NetworkMode};
 use crate::runtime;
 use crate::session;
@@ -51,6 +54,7 @@ where
                     HelpTopic::Launch => launch_usage_for(program),
                     HelpTopic::Run => run_usage_for(program),
                     HelpTopic::Stop => stop_usage_for(program),
+                    HelpTopic::Status => status_usage_for(program),
                     HelpTopic::Smoke => smoke_usage_for(program),
                 }
             );
@@ -137,23 +141,8 @@ where
             }
         }
         CliCommand::Run(options) => run_disposable_command(&options),
-        CliCommand::Stop(options) => {
-            let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
-            let run_dir = resolve_stop_run_dir(&options, &defaults);
-            let timeout = std::time::Duration::from_secs(options.timeout_secs.unwrap_or(3));
-            let report = stop_run_dir(&run_dir, timeout).map_err(|error| error.to_string())?;
-            println!("fend linux stop");
-            println!("  run dir    {}", run_dir.display());
-            println!("  stopped    {}", report.terminated.len());
-            println!("  stale      {}", report.stale.len());
-            if !report.terminated.is_empty() {
-                println!("  labels     {}", report.terminated.join(", "));
-            }
-            if !report.stale.is_empty() {
-                println!("  stale ids  {}", report.stale.join(", "));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        CliCommand::Stop(options) => run_stop_command(options),
+        CliCommand::Status => run_status_command(),
         CliCommand::Smoke(options) => {
             let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
             let config = crate::cli::build_smoke_config(&options, &defaults);
@@ -218,7 +207,69 @@ fn run_disposable_command(options: &crate::cli::RunOptions) -> Result<ExitCode, 
         return Ok(ExitCode::FAILURE);
     }
 
-    let plan = qemu::build_launch_plan(&config).map_err(|error| error.to_string())?;
+    if !daemon_disabled() {
+        match try_run_via_daemon(options, &config, &prepared, &runtime_dir) {
+            Ok(exit_code) => return Ok(exit_code),
+            Err(DaemonAttemptError::Recoverable(message)) => {
+                eprintln!("fend: daemon unavailable ({message}); using disposable VM");
+            }
+            Err(DaemonAttemptError::Fatal(message)) => return Err(message),
+        }
+    }
+
+    run_disposable_direct(options, &config, prepared)
+}
+
+enum DaemonAttemptError {
+    Recoverable(String),
+    Fatal(String),
+}
+
+fn try_run_via_daemon(
+    options: &crate::cli::RunOptions,
+    config: &LaunchConfig,
+    prepared: &runtime::PreparedGuestCommand,
+    runtime_dir: &Path,
+) -> Result<ExitCode, DaemonAttemptError> {
+    let socket = ipc::default_socket_path();
+    let vm_config = VmConfig {
+        project: config.workspace.clone(),
+        runtime_dir: runtime_dir.to_path_buf(),
+        cache_dir: config.cache_dir.clone(),
+        tools_dir: config.tools_dir.clone(),
+        guest_workspace: config.guest_workspace.clone(),
+        cpus: config.cpus,
+        memory_mib: config.memory_mib,
+        network: config.network,
+        epoch: config.epoch,
+    };
+    let session = match client::ensure_vm(&socket, vm_config) {
+        Ok(session) => session,
+        Err(client::ClientError::Daemon(message)) => {
+            return Err(DaemonAttemptError::Fatal(message));
+        }
+        Err(error) => return Err(DaemonAttemptError::Recoverable(error.to_string())),
+    };
+
+    let mut smoke_config = build_run_smoke_config(options, config);
+    smoke_config.cid = session.cid;
+    smoke_config.command = prepared.command.clone();
+    smoke_config.env.extend(prepared.env.clone());
+
+    let result = session::run_attached(&smoke_config)
+        .map_err(|error| DaemonAttemptError::Fatal(error.to_string()))?;
+    // _session drops here, closing the daemon socket and decrementing the
+    // active-session count for the project.
+    drop(session);
+    Ok(exit_code_from_i32(result.exit_code))
+}
+
+fn run_disposable_direct(
+    options: &crate::cli::RunOptions,
+    config: &LaunchConfig,
+    prepared: runtime::PreparedGuestCommand,
+) -> Result<ExitCode, String> {
+    let plan = qemu::build_launch_plan(config).map_err(|error| error.to_string())?;
     let mut supervisor = Supervisor::new(SupervisorOptions {
         qemu_io: ProcessIo::Log(config.run_dir.join("logs/qemu.log")),
         ..SupervisorOptions::default()
@@ -227,12 +278,115 @@ fn run_disposable_command(options: &crate::cli::RunOptions) -> Result<ExitCode, 
         .launch_plan(&plan)
         .map_err(|error| error.to_string())?;
 
-    let smoke_config = build_run_smoke_config(options, &config);
-    let mut prepared_smoke = smoke_config;
-    prepared_smoke.command = prepared.command;
-    prepared_smoke.env.extend(prepared.env);
-    let result = session::run_attached(&prepared_smoke).map_err(|error| error.to_string())?;
+    let mut smoke_config = build_run_smoke_config(options, config);
+    smoke_config.command = prepared.command;
+    smoke_config.env.extend(prepared.env);
+    let result = session::run_attached(&smoke_config).map_err(|error| error.to_string())?;
     Ok(exit_code_from_i32(result.exit_code))
+}
+
+fn daemon_disabled() -> bool {
+    matches!(env::var("FEND_NO_DAEMON").as_deref(), Ok("1") | Ok("true"))
+}
+
+fn run_stop_command(options: StopOptions) -> Result<ExitCode, String> {
+    if options.run_dir.is_some() || daemon_disabled() {
+        return run_stop_legacy(options);
+    }
+    let socket = ipc::default_socket_path();
+    // If no daemon is listening, --all/--project become silent no-ops.
+    if !socket.exists() {
+        println!("fend stop");
+        println!("  daemon     not running");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let project = if options.all {
+        None
+    } else {
+        Some(resolve_stop_project(&options)?)
+    };
+    match client::stop(&socket, project.clone()) {
+        Ok(count) => {
+            println!("fend stop");
+            match &project {
+                Some(path) => println!("  project    {}", path.display()),
+                None => println!("  scope      all"),
+            }
+            println!("  stopped    {count}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn run_stop_legacy(options: StopOptions) -> Result<ExitCode, String> {
+    let defaults = plan_defaults_from_env().map_err(|error| error.to_string())?;
+    let run_dir = resolve_stop_run_dir(&options, &defaults);
+    let timeout = std::time::Duration::from_secs(options.timeout_secs.unwrap_or(3));
+    let report = stop_run_dir(&run_dir, timeout).map_err(|error| error.to_string())?;
+    println!("fend linux stop");
+    println!("  run dir    {}", run_dir.display());
+    println!("  stopped    {}", report.terminated.len());
+    println!("  stale      {}", report.stale.len());
+    if !report.terminated.is_empty() {
+        println!("  labels     {}", report.terminated.join(", "));
+    }
+    if !report.stale.is_empty() {
+        println!("  stale ids  {}", report.stale.join(", "));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn resolve_stop_project(options: &StopOptions) -> Result<std::path::PathBuf, String> {
+    if let Some(project) = &options.project {
+        return Ok(project.clone());
+    }
+    env::current_dir().map_err(|error| format!("cannot determine current directory: {error}"))
+}
+
+fn run_status_command() -> Result<ExitCode, String> {
+    let socket = ipc::default_socket_path();
+    if !socket.exists() {
+        println!("fend status");
+        println!("  daemon     not running");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let vms = client::status(&socket).map_err(|error| error.to_string())?;
+    if vms.is_empty() {
+        println!("fend status");
+        println!("  no warm VMs");
+        return Ok(ExitCode::SUCCESS);
+    }
+    println!(
+        "{:<6}  {:<10}  {:<10}  {:<10}  PROJECT",
+        "CID", "STATE", "SESSIONS", "IDLE"
+    );
+    for vm in vms {
+        let idle = if vm.active_sessions > 0 {
+            "-".to_string()
+        } else {
+            format_duration(vm.idle_secs)
+        };
+        println!(
+            "{:<6}  {:<10}  {:<10}  {:<10}  {}",
+            vm.cid,
+            vm.state,
+            vm.active_sessions,
+            idle,
+            vm.project.display()
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 fn exit_code_from_i32(code: i32) -> ExitCode {
