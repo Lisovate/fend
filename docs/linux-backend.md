@@ -27,17 +27,62 @@ x86_64 host. The repo now proves:
 
 The Linux path is still a spike, not a shipped product:
 
-- The Rust Linux crate now exposes both `fend-linux` and a Linux `fend`
-  binary, the top-level disposable `fend <command>` path works on a real host,
-  and the first-run runtime bootstrap now lives in the Rust binary.
-- The disposable path now keeps long-running commands attached, forwards guest
+- The Rust Linux crate now exposes `fend`, `fend-linux`, and `fend-daemon`
+  binaries. The top-level `fend <command>` path works on a real host, and the
+  first-run runtime bootstrap lives in the Rust binary.
+- The disposable path keeps long-running commands attached, forwards guest
   ports back to `127.0.0.1`, and has been validated on a real Next.js app with
   `fend npm run dev`.
-- That top-level path is still disposable-only; warm VM reuse and daemon-backed
-  lifecycle parity are not done.
+- Warm VM reuse landed: `fend <command>` connects to (or auto-spawns) a
+  host-side `fend-daemon` that boots one VM per project, reuses it across
+  concurrent commands, and reaps idle VMs after a TTL. `fend status` and
+  `fend stop` now go through the daemon as well.
 - Runtime preparation still depends on Docker for the local rootfs build.
 - Full stdin passthrough and warm-VM interactive polish are not done.
 - Real release publishing, CI, and distro-facing setup docs are not done.
+- Daemon path has unit-test coverage on macOS host only; real-KVM soak is the
+  next validation step.
+
+## Daemon Architecture
+
+The Linux warm-VM path mirrors the macOS `FendDaemon` shape with Linux-native
+plumbing:
+
+- `fend-daemon` — separate binary at `linux/src/bin/fend-daemon.rs`. Owns a
+  `VmPool` and a Unix domain socket listener. Auto-spawned by `fend` on first
+  use via `setsid()` so it survives the CLI's process group.
+- `linux/src/pool.rs` — `VmPool` keeps one `VmEntry` per canonical project
+  path, allocates CIDs from `CID_BASE = 100`, holds the `RunningVm` handle,
+  ref-counts active sessions, and reaps `Running` VMs whose idle time exceeds
+  `DEFAULT_IDLE_TTL` (30 min). Insert-before-unlock prevents concurrent
+  `EnsureVm` calls for the same project from double-booting.
+- `linux/src/daemon.rs` — accept loop with thread-per-connection dispatch. On
+  startup, sweeps orphan VM run directories left by a stale daemon. Installs
+  `SIGTERM`/`SIGINT`/`SIGHUP` handlers via `libc::sigaction` that flip a static
+  `SHUTDOWN_REQUESTED` flag; the listener polls it between accepts.
+- `linux/src/ipc.rs` — framed-JSON protocol (4-byte BE length prefix,
+  `PROTOCOL_VERSION = 1`, 1 MiB cap). `Request`: `EnsureVm`, `Stop`, `Status`,
+  `Shutdown`. `Response`: `VmReady { cid, run_dir, booted }`, `Stopped`,
+  `Status`, `ShuttingDown`, `Error`.
+- `linux/src/client.rs` — CLI-side client. `Session` holds the daemon
+  `UnixStream` open for the lifetime of the command; the daemon treats socket
+  close (including CLI crash) as session-end and decrements the ref count. On
+  `connect_or_spawn`, the CLI auto-spawns the daemon (resolved via
+  `FEND_DAEMON_BINARY` → `current_exe` parent → `PATH`), with stdio redirected
+  to `<state-dir>/daemon.log`, then polls the socket for up to 5 s.
+
+Socket and state paths are resolved with the same fallback chain:
+`$FEND_DAEMON_SOCKET` → `$XDG_RUNTIME_DIR/fend/daemon.sock` →
+`$FEND_HOME/run/daemon.sock` → `~/.fend/run/daemon.sock` →
+`/tmp/fend-{uid}/daemon.sock`.
+
+Useful env vars:
+
+- `FEND_NO_DAEMON=1` — bypass the daemon entirely; falls back to the
+  disposable per-command boot path. Also implied when `fend stop` is invoked
+  with `--run-dir` (legacy single-VM teardown).
+- `FEND_DAEMON_SOCKET` — override the daemon socket path.
+- `FEND_DAEMON_BINARY` — override the binary used for auto-spawn.
 
 ## Phase 0: Baseline Quality
 
@@ -185,6 +230,16 @@ fend setup
 fend npm install
 ```
 
+Inspect and manage warm VMs through the daemon:
+
+```bash
+fend status                  # one-line-per-VM table: CID STATE SESSIONS IDLE PROJECT
+fend stop                    # stop the VM for the current project
+fend stop --project /path    # stop a specific project's VM
+fend stop --all              # stop every warm VM
+FEND_NO_DAEMON=1 fend npm test   # bypass daemon, use a disposable VM
+```
+
 If you want to launch the VM explicitly after the runtime exists in
 `~/.fend/runtime/linux-x86_64` or a custom `FEND_RUNTIME_DIR`, use the Rust
 Linux supervisor directly:
@@ -246,18 +301,21 @@ turning the spike into the first Linux product path.
 
 ### P0: Productize The Current Spike
 
-- Expand the new disposable Linux `fend <command>` path beyond one-shot runs:
+- [x] Expand the disposable Linux `fend <command>` path beyond one-shot runs:
   reuse VMs across commands, recover stale state, and stop depending on a
-  per-command boot.
-- Add Linux VM lifecycle management: one VM per project, reuse across commands,
-  deterministic shutdown, stale-CID recovery, and orphan sidecar cleanup.
-- Finish interactive command parity: stdin passthrough/prompt handling,
+  per-command boot. (`fend-daemon` + `VmPool`; auto-spawn from CLI; orphan
+  run-dir sweep on startup.)
+- [x] Add Linux VM lifecycle management: one VM per project, reuse across
+  commands, deterministic shutdown, stale-CID recovery, and orphan sidecar
+  cleanup. (Idle reaper, ref-counted sessions via Unix-socket keepalive,
+  `fend stop`/`fend status` route through the daemon.)
+- [ ] Finish interactive command parity: stdin passthrough/prompt handling,
   long-running session polish, and any remaining TTY edge cases after the new
   attached session path.
-- Extend the new localhost port forwarding beyond smoke validation with longer
-  soak coverage and network event reporting on the Rust Linux path.
-- Soak the current workspace/cache/tools mount model with real Node workflows
-  on Arch and Ubuntu.
+- [ ] Extend the new localhost port forwarding beyond smoke validation with
+  longer soak coverage and network event reporting on the Rust Linux path.
+- [ ] Soak the current workspace/cache/tools mount model with real Node
+  workflows on Arch and Ubuntu — including the new daemon path.
 
 ### P1: Remove Developer-Only Setup Friction
 

@@ -435,6 +435,7 @@ fn relay(mut vsock: VsockStream, tcp: TcpStream) {
     let _ = t2.join();
 }
 
+#[cfg(target_os = "linux")]
 fn signal_loop(fd: OwnedFd, writer: &mut VsockStream, tty: bool, stop: Arc<AtomicBool>) {
     let mut info = std::mem::MaybeUninit::<libc::signalfd_siginfo>::uninit();
 
