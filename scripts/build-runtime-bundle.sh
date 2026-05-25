@@ -159,7 +159,10 @@ BB_VER=$(grep -A1 "^P:busybox$" "$WORK_DIR/APKINDEX" | grep "^V:" | head -1 | cu
 curl -fsSL --retry 5 --retry-all-errors "${ALPINE_MIRROR}/busybox-${BB_VER}.apk" \
     -o "${WORK_DIR}/busybox.apk"
 mkdir -p "${WORK_DIR}/bb_extract"
-( cd "${WORK_DIR}/bb_extract" && tar -xf "${WORK_DIR}/busybox.apk" 2>/dev/null || true )
+# .apk archives have a leading signature blob tar refuses to consume; using
+# `|| true` lets us treat partial extraction as success and rely on the find
+# below to confirm we got the busybox binary.
+tar -xf "${WORK_DIR}/busybox.apk" -C "${WORK_DIR}/bb_extract" 2>/dev/null || true
 BUSYBOX_PATH=$(find "${WORK_DIR}/bb_extract" -name "busybox" -type f | head -1)
 [ -n "$BUSYBOX_PATH" ] || { echo "fend: failed to extract busybox" >&2; exit 1; }
 chmod +x "$BUSYBOX_PATH"
@@ -170,7 +173,7 @@ MUSL_VER=$(grep -A1 "^P:musl$" "$WORK_DIR/APKINDEX" | grep "^V:" | head -1 | cut
 curl -fsSL --retry 5 --retry-all-errors "${ALPINE_MIRROR}/musl-${MUSL_VER}.apk" \
     -o "${WORK_DIR}/musl.apk"
 mkdir -p "${WORK_DIR}/musl_extract"
-( cd "${WORK_DIR}/musl_extract" && tar -xf "${WORK_DIR}/musl.apk" 2>/dev/null || true )
+tar -xf "${WORK_DIR}/musl.apk" -C "${WORK_DIR}/musl_extract" 2>/dev/null || true
 MUSL_PATH=$(find "${WORK_DIR}/musl_extract" -name "ld-musl-aarch64.so.1" -type f | head -1)
 if [ -z "$MUSL_PATH" ]; then
     MUSL_PATH=$(find "${WORK_DIR}/musl_extract" -name "libc.musl*" -type f | head -1)
