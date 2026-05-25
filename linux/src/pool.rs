@@ -433,14 +433,16 @@ fn canonicalize(path: &Path) -> Result<PathBuf, PoolError> {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
 
     fn temp_state_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -612,7 +614,7 @@ mod tests {
         pool.ensure(make_config(&a)).unwrap();
         pool.ensure(make_config(&b)).unwrap();
         pool.release(&a); // a now has 0 active sessions
-        // b stays at 1 active session.
+                          // b stays at 1 active session.
         std::thread::sleep(Duration::from_millis(20));
         let reaped = pool.reap();
         assert_eq!(reaped, 1);

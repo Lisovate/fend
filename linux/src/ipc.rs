@@ -96,8 +96,7 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(reader: &mut R) -> io
     }
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
-    serde_json::from_slice(&buf)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    serde_json::from_slice(&buf).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// Default socket path for the host daemon.

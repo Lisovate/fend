@@ -286,9 +286,7 @@ extern "C" fn signal_handler(_: libc::c_int) {
 fn is_normal_close(error: &io::Error) -> bool {
     matches!(
         error.kind(),
-        io::ErrorKind::UnexpectedEof
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::BrokenPipe
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
     )
 }
 
