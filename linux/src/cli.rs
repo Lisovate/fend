@@ -736,12 +736,12 @@ fn parse_stop(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
 }
 
 fn parse_status(mut args: VecDeque<String>) -> Result<CliCommand, CliError> {
-    while let Some(arg) = args.pop_front() {
-        match arg.as_str() {
-            "-h" | "--help" => return Ok(CliCommand::Help(HelpTopic::Status)),
-            other if other.starts_with('-') => return Err(CliError::UnknownOption(arg)),
-            _ => return Err(CliError::UnexpectedArgument(arg)),
-        }
+    if let Some(arg) = args.pop_front() {
+        return match arg.as_str() {
+            "-h" | "--help" => Ok(CliCommand::Help(HelpTopic::Status)),
+            other if other.starts_with('-') => Err(CliError::UnknownOption(arg)),
+            _ => Err(CliError::UnexpectedArgument(arg)),
+        };
     }
     Ok(CliCommand::Status)
 }
