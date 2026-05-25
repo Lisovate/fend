@@ -9,7 +9,7 @@ struct Fend: AsyncParsableCommand {
         commandName: "fend",
         abstract: "Fend off risky dependencies. Sandboxed runtime for package installs and dev scripts.",
         version: "0.1.0-alpha.2",
-        subcommands: [Run.self, Claude.self, Audit.self, Init.self, Hook.self, On.self, Off.self, Status.self, Stop.self, Clean.self, Doctor.self, Log.self, DaemonCommand.self],
+        subcommands: [Run.self, Claude.self, Audit.self, Init.self, Hook.self, On.self, Off.self, Setup.self, Status.self, Stop.self, Clean.self, Doctor.self, Log.self, DaemonCommand.self],
         defaultSubcommand: Run.self
     )
 }
