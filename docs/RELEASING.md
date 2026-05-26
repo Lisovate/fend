@@ -56,10 +56,22 @@ The workflow refuses to publish without these. Set them under
 | `APPLE_ID`                             | The Apple ID associated with the Developer ID cert                                  |
 | `APPLE_TEAM_ID`                        | `487XSFNFDS`                                                                        |
 | `APPLE_APP_SPECIFIC_PASSWORD`          | `appleid.apple.com → Sign-In and Security → App-Specific Passwords`                 |
-| `NPM_TOKEN`                            | `npmjs.com → Access Tokens → Granular access`, publish scope on `@fendsh/*`         |
 
-`NPM_TOKEN` must be an automation token so it bypasses 2FA in CI;
-interactive WebAuthn / OTP login does not work inside GitHub Actions.
+npm auth uses **Trusted Publishing** (OIDC) — no `NPM_TOKEN` secret. The
+workflow exchanges GitHub's id-token for a short-lived publish credential
+at runtime, so there is nothing to rotate or leak. 2FA stays enforced on
+the account because automation doesn't bypass it; it doesn't use it.
+
+One-time per package on npmjs.com → package `Settings → Trusted Publisher`:
+
+- **Publisher**    GitHub Actions
+- **Organization** `Lisovate`
+- **Repository**   `fend`
+- **Workflow**     `release.yml`
+- **Environment**  *(blank)*
+
+Repeat for `@fendsh/cli`, `@fendsh/cli-darwin-arm64`, and
+`@fendsh/cli-linux-x64`. Allow only `npm publish` (not `npm stage publish`).
 
 ## Before tagging
 

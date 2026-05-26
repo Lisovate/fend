@@ -16,8 +16,15 @@ name: Release
 #   APPLE_TEAM_ID                        487XSFNFDS
 #   APPLE_APP_SPECIFIC_PASSWORD          appleid.apple.com → Sign-In and
 #                                        Security → App-Specific Passwords
-#   NPM_TOKEN                            npmjs.com → Access Tokens → Granular
-#                                        token with publish rights on @fendsh/*
+#
+# npm auth uses Trusted Publishing (OIDC) — no NPM_TOKEN secret. Configure
+# once per package on npmjs.com → package Settings → Trusted Publisher:
+#   Publisher       GitHub Actions
+#   Organization    Lisovate
+#   Repository      fend
+#   Workflow        release.yml
+#   Environment     (blank)
+# Repeat for @fendsh/cli, @fendsh/cli-darwin-arm64, @fendsh/cli-linux-x64.
 #
 # Action SHAs match .github/workflows/ci.yml. Pin any new ones before merging.
 # ────────────────────────────────────────────────────────────────────
@@ -295,6 +302,12 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      # Trusted Publishing (OIDC) requires npm >= 11.5.1; Node 20 ships
+      # with npm 10.x. Upgrading here keeps the rest of the toolchain on
+      # the LTS line we test against locally.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
+
       - name: Download darwin-arm64 artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -348,21 +361,20 @@ jobs:
             echo "tag=latest" >> "$GITHUB_OUTPUT"
           fi
 
+      # Auth: Trusted Publishing via OIDC. npm CLI auto-exchanges the
+      # workflow's id-token for a short-lived publish credential — no
+      # NPM_TOKEN secret needed. Set up per package on npmjs.com under
+      # Settings → Trusted Publisher (org: Lisovate, repo: fend,
+      # workflow: release.yml).
       - name: Publish @fendsh/cli-darwin-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/cli-darwin-arm64
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Publish @fendsh/cli-linux-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/cli-linux-x64
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Publish @fendsh/cli (root)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       # Until 1.0, point `latest` at the newest prerelease so users
@@ -371,8 +383,6 @@ jobs:
       # Drop this step once a non-prerelease tag (e.g. v1.0.0) lands.
       - name: Move latest dist-tag to this prerelease
         if: steps.tag.outputs.tag != 'latest'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
