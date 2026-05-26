@@ -13,13 +13,38 @@ so we can discuss the direction before you spend time building it.
 - Xcode 15+ for the Swift CLI and daemon
 - Rust stable
 - Rust target: `aarch64-unknown-linux-musl`
-- Docker for first-run rootfs image preparation
+- Docker — **contributors only**, for building the guest rootfs image
+  locally via `fend setup --build-from-source`. End users never need
+  Docker; they get a prebuilt runtime bundle from GitHub Releases.
 
 Install the Rust target with:
 
 ```bash
 rustup target add aarch64-unknown-linux-musl
 ```
+
+## Building the guest runtime locally
+
+The release pipeline publishes a `fend-runtime-darwin-arm64-v<VERSION>.tar.zst`
+asset to GitHub Releases for every tag, and the notarized `fend` binary
+auto-fetches + SHA-verifies that asset on first run. When you're working
+from a `swift run`/`swift build` source tree the binary is unsigned and
+its baked SHA is the empty-string `dev` placeholder, so the prebuilt
+path is intentionally disabled.
+
+Two options for getting a runtime in your dev checkout:
+
+1. Run `fend setup --build-from-source`. This invokes
+   `swift/scripts/prepare-runtime.sh`, which downloads the Ubuntu cloud
+   kernel, builds the initramfs, and produces `~/.fend/runtime/` from
+   scratch via Docker. Slow (~5–10 min) and needs Docker, but is the
+   only way to test boot/runtime changes without cutting a release.
+2. Set `FEND_DEV=1` and copy a runtime directory built elsewhere. Useful
+   when iterating on the host code and the guest image hasn't changed.
+
+`fend doctor` reports "developer (.git at …)" or "developer
+(FEND_DEV=1)" in the contributor-tools section when it detects either
+of these, and softens Docker/Rust warnings accordingly.
 
 ## Building
 

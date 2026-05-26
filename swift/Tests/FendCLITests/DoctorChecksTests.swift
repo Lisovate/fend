@@ -1,83 +1,134 @@
 import Foundation
 import XCTest
 @testable import FendCLI
+@testable import FendCommon
 
 final class DoctorChecksTests: XCTestCase {
-    func testMacReportKeepsExistingRuntimeGuidance() {
-        let runtime = URL(fileURLWithPath: "/tmp/fend/runtime")
-        let probe = DoctorProbe(
-            platform: .macOS,
-            osDescription: "macOS 14.0",
-            architecture: "arm64",
-            runtimeDir: runtime,
-            kernelPath: runtime.appendingPathComponent("vmlinuz"),
-            initrdPath: runtime.appendingPathComponent("initrd"),
-            rootfsPath: runtime.appendingPathComponent("rootfs.img"),
-            kernelExists: false,
-            initrdExists: true,
-            rootfsExists: false,
-            dockerAvailable: false,
-            configSummary: "node=auto bun=auto cpus=2 mem=2048MB"
-        )
 
-        let report = DoctorChecks.evaluate(probe)
+    // MARK: - Section status / exit-code mapping
 
-        XCTAssertTrue(report.issues.contains("Run scripts/prepare-runtime.sh to build runtime artifacts."))
-        XCTAssertTrue(report.issues.contains("Docker is required to build rootfs.img. Install Docker Desktop for Mac."))
-        XCTAssertEqual(field("kernel", in: report), "missing")
-        XCTAssertEqual(field("initrd", in: report), "/tmp/fend/runtime/initrd")
+    func testExitCodeZeroWhenAllRequiredPass() {
+        let sections = [
+            DoctorSection(
+                title: "System",
+                required: true,
+                status: .pass,
+                fields: [],
+                notes: []
+            ),
+            DoctorSection(
+                title: "Optional",
+                required: false,
+                status: .warn,
+                fields: [],
+                notes: []
+            ),
+        ]
+        XCTAssertEqual(DoctorChecks.exitCode(for: sections), 0)
     }
 
-    func testMacReportPassesWhenArtifactsAndDockerAreAvailable() {
-        let runtime = URL(fileURLWithPath: "/tmp/fend/runtime")
-        let probe = DoctorProbe(
-            platform: .macOS,
-            osDescription: "macOS 14.0",
-            architecture: "arm64",
-            runtimeDir: runtime,
-            kernelPath: runtime.appendingPathComponent("vmlinuz"),
-            initrdPath: runtime.appendingPathComponent("initrd"),
-            rootfsPath: runtime.appendingPathComponent("rootfs.img"),
-            kernelExists: true,
-            initrdExists: true,
-            rootfsExists: true,
-            dockerAvailable: true,
-            configSummary: "node=auto bun=auto cpus=2 mem=2048MB"
-        )
-
-        let report = DoctorChecks.evaluate(probe)
-
-        XCTAssertTrue(report.issues.isEmpty)
-        XCTAssertEqual(field("docker", in: report), "available")
-        XCTAssertEqual(field("rootfs", in: report), "/tmp/fend/runtime/rootfs.img")
+    func testExitCodeOneWhenRequiredFails() {
+        let sections = [
+            DoctorSection(
+                title: "Guest runtime",
+                required: true,
+                status: .fail,
+                fields: [],
+                notes: []
+            ),
+        ]
+        XCTAssertEqual(DoctorChecks.exitCode(for: sections), 1)
     }
 
-    func testUnsupportedPlatformReportDoesNotContainLinuxSpecificChecks() {
-        let runtime = URL(fileURLWithPath: "/tmp/fend/runtime")
-        let probe = DoctorProbe(
-            platform: .other("Linux 6.8"),
-            osDescription: "Linux 6.8",
-            architecture: "x86_64",
-            runtimeDir: runtime,
-            kernelPath: runtime.appendingPathComponent("vmlinuz"),
-            initrdPath: runtime.appendingPathComponent("initrd"),
-            rootfsPath: runtime.appendingPathComponent("rootfs.img"),
-            kernelExists: true,
-            initrdExists: true,
-            rootfsExists: true,
-            dockerAvailable: true,
-            configSummary: "node=auto bun=auto cpus=2 mem=2048MB"
-        )
-
-        let report = DoctorChecks.evaluate(probe)
-
-        XCTAssertEqual(field("platform", in: report), "Linux 6.8")
-        XCTAssertTrue(report.issues.contains("This host platform is not supported by the Swift macOS CLI."))
-        XCTAssertNil(field("qemu", in: report))
-        XCTAssertNil(field("/dev/kvm", in: report))
+    func testOptionalFailureDoesNotChangeExitCode() {
+        let sections = [
+            DoctorSection(
+                title: "Contributor",
+                required: false,
+                status: .fail,
+                fields: [],
+                notes: []
+            ),
+        ]
+        XCTAssertEqual(DoctorChecks.exitCode(for: sections), 0)
     }
 
-    private func field(_ name: String, in report: DoctorReport) -> String? {
-        report.fields.first { $0.0 == name }?.1
+    // MARK: - Dev-mode detection priorities
+
+    func testEnvOverrideWinsOverEverything() {
+        let originalEnv = ProcessInfo.processInfo.environment["FEND_DEV"]
+        setenv("FEND_DEV", "1", 1)
+        defer {
+            if let orig = originalEnv { setenv("FEND_DEV", orig, 1) }
+            else { unsetenv("FEND_DEV") }
+        }
+
+        let mode = DoctorChecks.detectDevMode()
+        XCTAssertEqual(mode, .envOverride)
+    }
+
+    func testEnvOverrideAcceptsTrueLiteral() {
+        let originalEnv = ProcessInfo.processInfo.environment["FEND_DEV"]
+        setenv("FEND_DEV", "true", 1)
+        defer {
+            if let orig = originalEnv { setenv("FEND_DEV", orig, 1) }
+            else { unsetenv("FEND_DEV") }
+        }
+
+        XCTAssertEqual(DoctorChecks.detectDevMode(), .envOverride)
+    }
+
+    // MARK: - Runtime section reflects on-disk state
+
+    func testRuntimeSectionPassesWhenAllFilesAndSentinelMatch() throws {
+        let paths = try makeTempPaths()
+        for name in RuntimeBootstrap.requiredFiles {
+            try Data("x".utf8).write(to: paths.runtimeDir.appendingPathComponent(name))
+        }
+        try RuntimeManifest.runtimeVersion.write(
+            to: paths.runtimeDir.appendingPathComponent(".version"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let sections = DoctorChecks.sections(paths: paths, config: FendConfig.load(from: paths.home))
+        let runtime = sections.first(where: { $0.title == "Guest runtime" })
+        XCTAssertNotNil(runtime)
+        XCTAssertEqual(runtime?.status, .pass)
+    }
+
+    func testRuntimeSectionFailsWhenArtifactsMissing() throws {
+        let paths = try makeTempPaths()
+        let sections = DoctorChecks.sections(paths: paths, config: FendConfig.load(from: paths.home))
+        let runtime = sections.first(where: { $0.title == "Guest runtime" })
+        XCTAssertEqual(runtime?.status, .fail)
+        let kernelField = runtime?.fields.first { $0.label == "kernel" }
+        XCTAssertEqual(kernelField?.status, .fail)
+    }
+
+    func testRuntimeSectionWarnsOnVersionDrift() throws {
+        let paths = try makeTempPaths()
+        for name in RuntimeBootstrap.requiredFiles {
+            try Data("x".utf8).write(to: paths.runtimeDir.appendingPathComponent(name))
+        }
+        try "0.0.0-some-old-version".write(
+            to: paths.runtimeDir.appendingPathComponent(".version"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let sections = DoctorChecks.sections(paths: paths, config: FendConfig.load(from: paths.home))
+        let runtime = sections.first(where: { $0.title == "Guest runtime" })
+        XCTAssertEqual(runtime?.status, .warn)
+    }
+
+    // MARK: - Helpers
+
+    private func makeTempPaths() throws -> FendPaths {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fend-doctor-test-\(UUID().uuidString)")
+        let paths = FendPaths(home: home)
+        try paths.ensureDirectories()
+        return paths
     }
 }

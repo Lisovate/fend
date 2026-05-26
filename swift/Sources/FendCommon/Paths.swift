@@ -15,7 +15,13 @@ public struct FendPaths {
 
     public init() {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
-        self.home = homeDir.appendingPathComponent(".fend")
+        self.init(home: homeDir.appendingPathComponent(".fend"))
+    }
+
+    /// Test-only initializer that takes the .fend home dir explicitly so
+    /// suites can point at a tempdir instead of mutating the user's home.
+    public init(home: URL) {
+        self.home = home
         self.runtimeDir = home.appendingPathComponent("runtime")
         self.cacheDir = home.appendingPathComponent("cache")
         self.toolsDir = home.appendingPathComponent("tools")

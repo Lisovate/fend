@@ -64,19 +64,46 @@ public final class VMInstance: NSObject, VZVirtualMachineDelegate, @unchecked Se
     public func start() async throws {
         state = .booting
 
+        // Auto-bootstrap the runtime on first run / after a version bump.
+        // A notarized release binary has the bundle URL + SHA256 baked in;
+        // a dev (`swift run`) build throws devBuildNeedsSource and asks the
+        // user to opt into the from-source path explicitly.
+        if !RuntimeBootstrap.isRuntimeReady(paths) {
+            do {
+                try RuntimeBootstrap.ensureRuntime(paths: paths) { event in
+                    switch event {
+                    case .downloading(let url, _):
+                        fputs("fend: fetching runtime from \(url)\n", stderr)
+                    case .verifying:
+                        fputs("fend: verifying runtime integrity\n", stderr)
+                    case .extracting:
+                        fputs("fend: extracting runtime\n", stderr)
+                    case .installing(let target):
+                        fputs("fend: installing runtime to \(target.path)\n", stderr)
+                    case .warning(let msg):
+                        fputs("fend: \(msg)\n", stderr)
+                    case .alreadyPresent, .done:
+                        break
+                    }
+                }
+            } catch let bootErr as BootstrapError {
+                throw FendError.missingRuntime(bootErr.localizedDescription)
+            }
+        }
+
         let kernelURL = paths.runtimeDir.appendingPathComponent("vmlinuz")
         let initrdURL = paths.runtimeDir.appendingPathComponent("initrd")
 
         guard FileManager.default.fileExists(atPath: kernelURL.path) else {
-            throw FendError.missingRuntime("Kernel not found at \(kernelURL.path). Run: scripts/prepare-runtime.sh")
+            throw FendError.missingRuntime("Kernel not found at \(kernelURL.path) after bootstrap. Run `fend setup --force`.")
         }
         guard FileManager.default.fileExists(atPath: initrdURL.path) else {
-            throw FendError.missingRuntime("Initrd not found at \(initrdURL.path). Run: scripts/prepare-runtime.sh")
+            throw FendError.missingRuntime("Initrd not found at \(initrdURL.path) after bootstrap. Run `fend setup --force`.")
         }
 
         let rootfsURL = paths.rootfsImagePath
         guard FileManager.default.fileExists(atPath: rootfsURL.path) else {
-            throw FendError.missingRuntime("rootfs.img not found at \(rootfsURL.path). Run: scripts/prepare-runtime.sh")
+            throw FendError.missingRuntime("rootfs.img not found at \(rootfsURL.path) after bootstrap. Run `fend setup --force`.")
         }
 
         // Create per-project APFS clone of rootfs.img

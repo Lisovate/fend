@@ -125,22 +125,36 @@ struct Doctor: ParsableCommand {
         abstract: "Check prerequisites and system compatibility"
     )
 
-    func run() {
+    func run() throws {
         let paths = FendPaths()
         let config = FendConfig.load(from: URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
-        let report = DoctorChecks.evaluate(DoctorChecks.currentProbe(paths: paths, config: config))
+        let sections = DoctorChecks.sections(paths: paths, config: config)
 
-        TerminalUI.section(report.title)
-        TerminalUI.fields(report.fields)
+        let versionLabel = RuntimeManifest.isDevBuild
+            ? "fend doctor (dev build)"
+            : "fend doctor v\(RuntimeManifest.runtimeVersion)"
+        TerminalUI.section(versionLabel)
+        TerminalUI.blank(.stdout)
 
-        if report.issues.isEmpty {
+        for section in sections {
+            TerminalUI.renderDoctorSection(section)
             TerminalUI.blank(.stdout)
-            TerminalUI.success("all checks passed", stream: .stdout)
+        }
+
+        let requiredFailures = sections.filter { $0.required && $0.status == .fail }
+        if requiredFailures.isEmpty {
+            TerminalUI.success("all required checks passed", stream: .stdout)
         } else {
-            TerminalUI.blank(.stdout)
-            for issue in report.issues {
-                TerminalUI.warning(issue, stream: .stdout)
-            }
+            TerminalUI.error(
+                "\(requiredFailures.count) required check(s) failed",
+                detail: requiredFailures.map { $0.title }.joined(separator: ", "),
+                stream: .stdout
+            )
+        }
+
+        let code = DoctorChecks.exitCode(for: sections)
+        if code != 0 {
+            throw ExitCode(code)
         }
     }
 }

@@ -182,6 +182,36 @@ enum TerminalUI {
         return "\(label) \(message)\(suffix)"
     }
 
+    /// Flutter-doctor-style section: bracketed status, title bolded, then
+    /// indented fields (each with its own per-row [✓]/[!]/[✗] when set),
+    /// then any explanatory notes.
+    static func renderDoctorSection(_ section: DoctorSection) {
+        let color = shouldUseColor(stream: .stdout)
+        let bracket = style(section.status.bracket, section.status.color, enabled: color)
+        let title = style(section.title, .bold, enabled: color)
+        writeLine("\(bracket) \(title)", stream: .stdout)
+
+        let labelWidth = section.fields
+            .map { $0.label.count }
+            .max() ?? 0
+        let width = min(max(labelWidth, 1), 18)
+
+        for field in section.fields {
+            let labelPadded = field.label.padding(toLength: width, withPad: " ", startingAt: 0)
+            let labelStyled = style(labelPadded, .dim, enabled: color)
+            if let status = field.status {
+                let rowBracket = style(status.bracket, status.color, enabled: color)
+                writeLine("    \(rowBracket) \(labelStyled)  \(field.value)", stream: .stdout)
+            } else {
+                writeLine("        \(labelStyled)  \(field.value)", stream: .stdout)
+            }
+        }
+
+        for note in section.notes {
+            writeLine("    \(style(note, .dim, enabled: color))", stream: .stdout)
+        }
+    }
+
     static func style(_ text: String, _ color: ANSIColor, enabled: Bool) -> String {
         guard enabled else { return text }
         return "\u{001B}[\(color.code)m\(text)\u{001B}[0m"

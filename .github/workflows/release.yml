@@ -16,8 +16,15 @@ name: Release
 #   APPLE_TEAM_ID                        487XSFNFDS
 #   APPLE_APP_SPECIFIC_PASSWORD          appleid.apple.com → Sign-In and
 #                                        Security → App-Specific Passwords
-#   NPM_TOKEN                            npmjs.com → Access Tokens → Granular
-#                                        token with publish rights on @fendsh/*
+#
+# npm auth uses Trusted Publishing (OIDC) — no NPM_TOKEN secret. Configure
+# once per package on npmjs.com → package Settings → Trusted Publisher:
+#   Publisher       GitHub Actions
+#   Organization    Lisovate
+#   Repository      fend
+#   Workflow        release.yml
+#   Environment     (blank)
+# Repeat for @fendsh/cli, @fendsh/cli-darwin-arm64, @fendsh/cli-linux-x64.
 #
 # Action SHAs match .github/workflows/ci.yml. Pin any new ones before merging.
 # ────────────────────────────────────────────────────────────────────
@@ -30,17 +37,108 @@ on:
 permissions:
   contents: write       # for creating the GitHub Release
   id-token: write       # for npm Sigstore provenance via OIDC
+  attestations: write   # for actions/attest-build-provenance on the runtime bundle
 
 jobs:
+  # ────────────────────────────────────────────────────────────────
+  # Job 0 — Linux arm64: build the macOS guest runtime bundle
+  #          (vmlinuz + initrd + rootfs.img → fend-runtime-darwin-arm64-v$VER.tar.zst)
+  #          Output SHA256 is consumed by build-darwin-arm64 to bake into
+  #          the notarized binary so first-run verification needs no
+  #          out-of-band trust.
+  # ────────────────────────────────────────────────────────────────
+  build-runtime-darwin-arm64:
+    name: build-runtime-darwin-arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-musl
+
+      - name: Restore Cargo cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: fendd -> target
+
+      - name: Build fendd (aarch64-musl)
+        run: |
+          set -euo pipefail
+          # cd so fendd/.cargo/config.toml (linker = rust-lld) is honoured.
+          (cd fendd && cargo build --release --target aarch64-unknown-linux-musl --bin fendd)
+          file fendd/target/aarch64-unknown-linux-musl/release/fendd
+
+      - name: Install host tools (zstd, jq, cpio)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zstd jq cpio file
+
+      - name: Resolve runtime version from tag
+        id: rt
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build runtime bundle
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          ./scripts/build-runtime-bundle.sh \
+              --version "${{ steps.rt.outputs.version }}" \
+              --fendd-bin fendd/target/aarch64-unknown-linux-musl/release/fendd \
+              --output-dir out
+
+      - name: Attest runtime bundle provenance
+        uses: actions/attest-build-provenance@619dbb2e03d9834d0e0ac9e0469a23a1a85aa302 # v3.0.0
+        with:
+          subject-path: out/fend-runtime-darwin-arm64-v${{ steps.rt.outputs.version }}.tar.zst
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-darwin-arm64
+          path: out/
+          retention-days: 7
+
   # ────────────────────────────────────────────────────────────────
   # Job 1 — macOS arm64: build, Developer-ID-sign, notarize
   # ────────────────────────────────────────────────────────────────
   build-darwin-arm64:
     name: build-darwin-arm64
+    needs: build-runtime-darwin-arm64
     runs-on: macos-14
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download runtime artifact (for SHA bake-in)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-darwin-arm64
+          path: runtime-out/
+
+      - name: Generate RuntimeManifest.swift with embedded SHA
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          BUNDLE="fend-runtime-darwin-arm64-v${VERSION}.tar.zst"
+          SHA=$(awk '{print $1}' "runtime-out/${BUNDLE}.sha256")
+
+          if [ -z "$SHA" ] || [ ${#SHA} -ne 64 ]; then
+            echo "fend: refused to bake invalid SHA256 ($SHA) into the binary" >&2
+            exit 1
+          fi
+
+          ./scripts/write-runtime-manifest.sh \
+              --version "$VERSION" \
+              --bundle "$BUNDLE" \
+              --sha256 "$SHA" \
+              --output swift/Sources/FendCommon/RuntimeManifest.swift
+
+          cat swift/Sources/FendCommon/RuntimeManifest.swift
 
       - name: Set up Swift
         uses: swift-actions/setup-swift@7ca6abe6b3b0e8b5421b88be48feee39cbf52c6a # v2.4.0
@@ -128,7 +226,7 @@ jobs:
           codesign -dv "$BINARY"
 
       - name: Upload darwin-arm64 artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cli-darwin-arm64
           path: packages/cli-darwin-arm64/
@@ -180,7 +278,7 @@ jobs:
           chmod +x "$PLATFORM_DIR/bin/fend" "$PLATFORM_DIR/libexec/fendd"
 
       - name: Upload linux-x64 artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: cli-linux-x64
           path: packages/cli-linux-x64/
@@ -192,29 +290,41 @@ jobs:
   # ────────────────────────────────────────────────────────────────
   publish:
     name: publish
-    needs: [build-darwin-arm64, build-linux-x64]
+    needs: [build-runtime-darwin-arm64, build-darwin-arm64, build-linux-x64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      # Trusted Publishing (OIDC) requires npm >= 11.5.1; Node 20 ships
+      # with npm 10.x. Upgrading here keeps the rest of the toolchain on
+      # the LTS line we test against locally.
+      - name: Upgrade npm for Trusted Publishing
+        run: npm install -g npm@latest
+
       - name: Download darwin-arm64 artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: cli-darwin-arm64
           path: packages/cli-darwin-arm64/
 
       - name: Download linux-x64 artifact
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: cli-linux-x64
           path: packages/cli-linux-x64/
+
+      - name: Download runtime-darwin-arm64 artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-darwin-arm64
+          path: runtime-out/
 
       - name: Verify artifacts and version match
         run: |
@@ -251,21 +361,20 @@ jobs:
             echo "tag=latest" >> "$GITHUB_OUTPUT"
           fi
 
+      # Auth: Trusted Publishing via OIDC. npm CLI auto-exchanges the
+      # workflow's id-token for a short-lived publish credential — no
+      # NPM_TOKEN secret needed. Set up per package on npmjs.com under
+      # Settings → Trusted Publisher (org: Lisovate, repo: fend,
+      # workflow: release.yml).
       - name: Publish @fendsh/cli-darwin-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/cli-darwin-arm64
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Publish @fendsh/cli-linux-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/cli-linux-x64
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       - name: Publish @fendsh/cli (root)
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag "${{ steps.tag.outputs.tag }}"
 
       # Until 1.0, point `latest` at the newest prerelease so users
@@ -274,8 +383,6 @@ jobs:
       # Drop this step once a non-prerelease tag (e.g. v1.0.0) lands.
       - name: Move latest dist-tag to this prerelease
         if: steps.tag.outputs.tag != 'latest'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF#refs/tags/v}"
@@ -283,15 +390,30 @@ jobs:
           npm dist-tag add "@fendsh/cli-darwin-arm64@${VERSION}" latest
           npm dist-tag add "@fendsh/cli-linux-x64@${VERSION}" latest
 
-      - name: Create GitHub release
+      - name: Create GitHub release and upload runtime bundle
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           TAG_REF="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG_REF#v}"
+          BUNDLE="fend-runtime-darwin-arm64-v${VERSION}.tar.zst"
+
+          # Bundle and macOS binary were both built off the same workflow
+          # artifact, so the SHA baked into the binary is the SHA we're
+          # uploading here — no separate cross-check needed at this layer.
+          test -f "runtime-out/${BUNDLE}"
+          test -f "runtime-out/${BUNDLE}.sha256"
+          test -f "runtime-out/manifest.json"
+
           ARGS=("$TAG_REF" --title "$TAG_REF" --generate-notes)
           if [ "$TAG_NAME" != "latest" ]; then
             ARGS+=(--prerelease)
           fi
+          ARGS+=(
+            "runtime-out/${BUNDLE}"
+            "runtime-out/${BUNDLE}.sha256"
+            "runtime-out/manifest.json"
+          )
           gh release create "${ARGS[@]}"

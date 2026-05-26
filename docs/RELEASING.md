@@ -1,11 +1,24 @@
 # Releasing Fend
 
 Pushing an annotated `v*` tag triggers `.github/workflows/release.yml`,
-which builds the signed + notarized macOS arm64 and Linux x64 musl
-binaries, publishes all three `@fendsh/*` npm packages with Sigstore
-provenance, and creates the GitHub release. The manual flow below the
-fold is the fallback when CI auth is unavailable or the workflow is
-mid-fix.
+which:
+
+1. Builds the macOS guest runtime bundle (kernel + initrd + ext4 rootfs
+   image) on an `ubuntu-24.04-arm` runner and uploads it as a workflow
+   artifact. Build provenance is attested via
+   `actions/attest-build-provenance@v3` so power users can verify the
+   asset chain with `gh attestation verify`.
+2. Builds the signed + notarized macOS arm64 fend binary on `macos-14`,
+   pulling the runtime SHA256 from step 1 into a generated
+   `RuntimeManifest.swift` so the notarized binary already knows which
+   bundle to download and how to verify it on first run.
+3. Builds the Linux x64 musl binaries.
+4. Publishes all three `@fendsh/*` npm packages with Sigstore provenance.
+5. Creates the GitHub release and uploads the runtime bundle plus its
+   `.sha256` sidecar and `manifest.json` as release assets.
+
+The manual flow below the fold is the fallback when CI auth is
+unavailable or the workflow is mid-fix.
 
 ## Release tag format
 
@@ -43,10 +56,22 @@ The workflow refuses to publish without these. Set them under
 | `APPLE_ID`                             | The Apple ID associated with the Developer ID cert                                  |
 | `APPLE_TEAM_ID`                        | `487XSFNFDS`                                                                        |
 | `APPLE_APP_SPECIFIC_PASSWORD`          | `appleid.apple.com → Sign-In and Security → App-Specific Passwords`                 |
-| `NPM_TOKEN`                            | `npmjs.com → Access Tokens → Granular access`, publish scope on `@fendsh/*`         |
 
-`NPM_TOKEN` must be an automation token so it bypasses 2FA in CI;
-interactive WebAuthn / OTP login does not work inside GitHub Actions.
+npm auth uses **Trusted Publishing** (OIDC) — no `NPM_TOKEN` secret. The
+workflow exchanges GitHub's id-token for a short-lived publish credential
+at runtime, so there is nothing to rotate or leak. 2FA stays enforced on
+the account because automation doesn't bypass it; it doesn't use it.
+
+One-time per package on npmjs.com → package `Settings → Trusted Publisher`:
+
+- **Publisher**    GitHub Actions
+- **Organization** `Lisovate`
+- **Repository**   `fend`
+- **Workflow**     `release.yml`
+- **Environment**  *(blank)*
+
+Repeat for `@fendsh/cli`, `@fendsh/cli-darwin-arm64`, and
+`@fendsh/cli-linux-x64`. Allow only `npm publish` (not `npm stage publish`).
 
 ## Before tagging
 
@@ -140,7 +165,14 @@ gh release create v<version> --prerelease --generate-notes
 
 - Verify `npm install -g @fendsh/cli@<version>` from a clean machine
 - Verify `fend --version` reports `<version>`
-- Verify `fend doctor`
+- Verify `fend doctor` — runtime section should report `[!]` (not
+  installed) before the first `fend setup` / `fend <cmd>` run, then
+  `[✓]` with the matching `version` afterwards
+- Run `fend setup` and confirm the download/verify/install path picks
+  up the GH Release asset under ~2 minutes on a normal connection
 - Verify a real `fend npm install` run on macOS Apple Silicon
+- Optional power-user check: `gh attestation verify
+  fend-runtime-darwin-arm64-v<version>.tar.zst --owner Lisovate` should
+  return a verified provenance record built from this exact tag
 - Announce only after the install path, security policy links, and
   release notes all look correct
